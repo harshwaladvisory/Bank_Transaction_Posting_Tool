@@ -9,10 +9,12 @@ Features: Autocomplete, Confidence Colors, Bulk Actions, Audit Trail, Vendor Mat
 import os
 import sys
 import json
+import io
+import base64
 from datetime import datetime
 from functools import wraps
 from bson import ObjectId
-from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, send_file
+from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, send_file, Response
 from werkzeug.utils import secure_filename
 
 # MongoDB imports
@@ -26,7 +28,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import OUTPUT_DIR, DATA_DIR
+from config import DATA_DIR
 from parsers import UniversalParser
 from classifiers import ClassificationEngine
 from processors import ModuleRouter, EntryBuilder, OutputGenerator
@@ -41,11 +43,11 @@ MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
 MONGODB_DATABASE = os.environ.get('MONGODB_DATABASE', 'bank_posting_tool')
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Note: Output files are now stored in memory, no local output directory needed
 
 CUSTOM_DATA_FILE = os.path.join(os.path.dirname(__file__), 'custom_master_data.json')
 
-session_data = {'transactions': [], 'classified': [], 'audit_trail': [], 'output_files': []}
+session_data = {'transactions': [], 'classified': [], 'audit_trail': [], 'output_files': [], 'current_batch_id': None}
 
 # ============ MONGODB CONNECTION ============
 
@@ -70,7 +72,7 @@ def init_mongodb():
     
     try:
         # Create collections if they don't exist
-        collections = ['transactions', 'gl_codes', 'fund_codes', 'vendors', 'customers', 'batches', 'audit_logs']
+        collections = ['transactions', 'gl_codes', 'fund_codes', 'vendors', 'customers', 'batches', 'audit_logs', 'output_files']
         existing = db.list_collection_names()
         for coll in collections:
             if coll not in existing:
@@ -87,6 +89,8 @@ def init_mongodb():
         db.customers.create_index([('name', 1)])
         db.batches.create_index([('created_at', -1)])
         db.audit_logs.create_index([('timestamp', -1)])
+        db.output_files.create_index([('created_at', -1)])
+        db.output_files.create_index([('batch_id', 1)])
         
         print(f"MongoDB initialized: {MONGODB_URI}{MONGODB_DATABASE}")
         return True
@@ -679,24 +683,230 @@ def process():
         router = ModuleRouter()
         routed_by_module = router.route_batch(classified)
         
-        all_routed = []
-        for module in ['CR', 'CD', 'JV', 'UNIDENTIFIED']:
-            all_routed.extend(routed_by_module.get(module, []))
-        
-        builder = EntryBuilder(target_system='MIP')
-        entries = builder.build_batch(all_routed)
-        
-        generator = OutputGenerator(output_dir=OUTPUT_DIR)
-        output_files = generator.generate_all(entries)
-        
+        # Generate files in-memory and store in MongoDB
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        batch_id = f"BATCH_{timestamp}"
         files_list = []
-        for module, filepath in output_files.items():
-            if filepath:
-                filename = os.path.basename(filepath)
-                files_list.append({'filename': filename, 'description': f'{module} Import File', 'filepath': filepath})
         
+        # Get MongoDB connection
+        db = get_db()
+        
+        # Generate Excel file for each module with transactions
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        
+        module_names = {
+            'CR': 'Cash_Receipts',
+            'CD': 'Cash_Disbursements', 
+            'JV': 'Journal_Voucher'
+        }
+        
+        # Use routed_by_module directly - already grouped by module
+        for module in ['CR', 'CD', 'JV']:
+            module_entries = routed_by_module.get(module, [])
+            if module_entries:
+                filename = f"{module_names[module]}_{timestamp}.xlsx"
+                
+                # Create workbook in memory
+                buffer = io.BytesIO()
+                wb = Workbook()
+                ws = wb.active
+                ws.title = module_names[module]
+                
+                # Add headers
+                headers = ['Date', 'Description', 'Amount', 'GL Code', 'Fund Code', 'Module', 'Payee', 'Reference']
+                header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+                header_font = Font(color='FFFFFF', bold=True)
+                
+                for col, header in enumerate(headers, 1):
+                    cell = ws.cell(row=1, column=col, value=header)
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal='center')
+                
+                # Add data rows - handle both dict and other formats
+                for row_idx, entry in enumerate(module_entries, 2):
+                    if isinstance(entry, dict):
+                        ws.cell(row=row_idx, column=1, value=entry.get('date', ''))
+                        ws.cell(row=row_idx, column=2, value=entry.get('description', ''))
+                        ws.cell(row=row_idx, column=3, value=entry.get('amount', 0))
+                        ws.cell(row=row_idx, column=4, value=entry.get('gl_code', ''))
+                        ws.cell(row=row_idx, column=5, value=entry.get('fund_code', ''))
+                        ws.cell(row=row_idx, column=6, value=module)
+                        ws.cell(row=row_idx, column=7, value=entry.get('payee', entry.get('vendor', '')))
+                        ws.cell(row=row_idx, column=8, value=entry.get('reference', entry.get('check_number', '')))
+                    else:
+                        # Handle non-dict entries (convert to string)
+                        ws.cell(row=row_idx, column=2, value=str(entry))
+                        ws.cell(row=row_idx, column=6, value=module)
+                
+                # Auto-adjust column widths
+                for col in ws.columns:
+                    max_length = max(len(str(cell.value or '')) for cell in col)
+                    ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+                
+                wb.save(buffer)
+                buffer.seek(0)
+                file_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                
+                # Store in MongoDB if available
+                file_doc = {
+                    'filename': filename,
+                    'batch_id': batch_id,
+                    'module': module,
+                    'description': f'{module_names[module]} Import File ({len(module_entries)} entries)',
+                    'file_data': file_data,
+                    'file_size': len(buffer.getvalue()),
+                    'entry_count': len(module_entries),
+                    'created_at': datetime.now(),
+                    'content_type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                }
+                
+                if db is not None:
+                    result = db.output_files.insert_one(file_doc)
+                    file_doc['_id'] = result.inserted_id
+                
+                files_list.append({
+                    'filename': filename, 
+                    'description': f'{module_names[module]} Import File ({len(module_entries)} entries)',
+                    'file_id': str(file_doc.get('_id', filename))
+                })
+        
+        # Generate Unidentified file if any
+        unidentified = routed_by_module.get('UNIDENTIFIED', [])
+        if unidentified:
+            filename = f"Unidentified_{timestamp}.xlsx"
+            buffer = io.BytesIO()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = 'Unidentified'
+            
+            headers = ['Date', 'Description', 'Amount', 'Suggested GL', 'Suggested Fund', 'Confidence', 'Notes']
+            header_fill = PatternFill(start_color='C65911', end_color='C65911', fill_type='solid')
+            header_font = Font(color='FFFFFF', bold=True)
+            
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.fill = header_fill
+                cell.font = header_font
+            
+            for row_idx, txn in enumerate(unidentified, 2):
+                if isinstance(txn, dict):
+                    ws.cell(row=row_idx, column=1, value=txn.get('date', ''))
+                    ws.cell(row=row_idx, column=2, value=txn.get('description', ''))
+                    ws.cell(row=row_idx, column=3, value=txn.get('amount', 0))
+                    ws.cell(row=row_idx, column=4, value=txn.get('gl_code', ''))
+                    ws.cell(row=row_idx, column=5, value=txn.get('fund_code', ''))
+                    ws.cell(row=row_idx, column=6, value=txn.get('confidence_level', 'low'))
+                    ws.cell(row=row_idx, column=7, value='Needs manual review')
+                else:
+                    ws.cell(row=row_idx, column=2, value=str(txn))
+                    ws.cell(row=row_idx, column=7, value='Needs manual review')
+            
+            for col in ws.columns:
+                max_length = max(len(str(cell.value or '')) for cell in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+            
+            wb.save(buffer)
+            buffer.seek(0)
+            file_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            file_doc = {
+                'filename': filename,
+                'batch_id': batch_id,
+                'module': 'UNIDENTIFIED',
+                'description': f'Unidentified Transactions ({len(unidentified)} entries) - Needs Review',
+                'file_data': file_data,
+                'file_size': len(buffer.getvalue()),
+                'entry_count': len(unidentified),
+                'created_at': datetime.now(),
+                'content_type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            }
+            
+            if db is not None:
+                result = db.output_files.insert_one(file_doc)
+                file_doc['_id'] = result.inserted_id
+            
+            files_list.append({
+                'filename': filename, 
+                'description': f'Unidentified Transactions ({len(unidentified)} entries) - Needs Review',
+                'file_id': str(file_doc.get('_id', filename))
+            })
+        
+        # Generate Summary Report
+        filename = f"Processing_Summary_{timestamp}.xlsx"
+        buffer = io.BytesIO()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Summary'
+        
+        # Summary header
+        ws.cell(row=1, column=1, value='Bank Transaction Processing Summary')
+        ws.cell(row=1, column=1).font = Font(bold=True, size=14)
+        ws.cell(row=2, column=1, value=f'Generated: {datetime.now().strftime("%m/%d/%Y %H:%M:%S")}')
+        
+        ws.cell(row=4, column=1, value='Module')
+        ws.cell(row=4, column=2, value='Count')
+        ws.cell(row=4, column=3, value='Total Amount')
+        
+        row = 5
+        total_count = 0
+        total_amount = 0
+        for module in ['CR', 'CD', 'JV', 'UNIDENTIFIED']:
+            module_txns = routed_by_module.get(module, [])
+            count = len(module_txns)
+            # Safely calculate amount - handle both dict and non-dict entries
+            amount = 0
+            for t in module_txns:
+                if isinstance(t, dict):
+                    amount += abs(t.get('amount', 0) or 0)
+            ws.cell(row=row, column=1, value=module)
+            ws.cell(row=row, column=2, value=count)
+            ws.cell(row=row, column=3, value=amount)
+            total_count += count
+            total_amount += amount
+            row += 1
+        
+        ws.cell(row=row, column=1, value='TOTAL')
+        ws.cell(row=row, column=1).font = Font(bold=True)
+        ws.cell(row=row, column=2, value=total_count)
+        ws.cell(row=row, column=3, value=total_amount)
+        
+        wb.save(buffer)
+        buffer.seek(0)
+        file_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        file_doc = {
+            'filename': filename,
+            'batch_id': batch_id,
+            'module': 'SUMMARY',
+            'description': 'Processing Summary Report',
+            'file_data': file_data,
+            'file_size': len(buffer.getvalue()),
+            'entry_count': total_count,
+            'created_at': datetime.now(),
+            'content_type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
+        
+        if db is not None:
+            result = db.output_files.insert_one(file_doc)
+            file_doc['_id'] = result.inserted_id
+        
+        files_list.append({
+            'filename': filename, 
+            'description': 'Processing Summary Report',
+            'file_id': str(file_doc.get('_id', filename))
+        })
+        
+        # Store batch_id in session for results page
         session_data['output_files'] = files_list
-        flash('Files generated!', 'success')
+        session_data['current_batch_id'] = batch_id
+        
+        if db is not None:
+            flash(f'Files generated and stored in database! Batch ID: {batch_id}', 'success')
+        else:
+            flash('Files generated! (MongoDB not available - files stored in session only)', 'warning')
+        
         return redirect(url_for('results'))
     except Exception as e:
         flash(f'Error: {str(e)}', 'error')
@@ -710,8 +920,142 @@ def results():
 
 @app.route('/download/<filename>')
 def download(filename):
-    path = os.path.join(OUTPUT_DIR, filename)
-    return send_file(path, as_attachment=True) if os.path.exists(path) else redirect(url_for('results'))
+    """Download file from MongoDB storage"""
+    db = get_db()
+    
+    if db is not None:
+        # Try to find file in MongoDB
+        file_doc = db.output_files.find_one({'filename': filename})
+        if file_doc:
+            file_data = base64.b64decode(file_doc['file_data'])
+            buffer = io.BytesIO(file_data)
+            buffer.seek(0)
+            return send_file(
+                buffer,
+                as_attachment=True,
+                download_name=filename,
+                mimetype=file_doc.get('content_type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            )
+    
+    flash('File not found in database. Please regenerate the files.', 'error')
+    return redirect(url_for('results'))
+
+
+@app.route('/download_all_zip')
+def download_all_zip():
+    """Download all output files as a single ZIP file"""
+    import zipfile
+    
+    db = get_db()
+    output_files = session_data.get('output_files', [])
+    
+    if not output_files:
+        flash('No files to download. Please process a file first.', 'error')
+        return redirect(url_for('results'))
+    
+    # Create ZIP file in memory
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for file_info in output_files:
+            filename = file_info.get('filename')
+            if filename and db is not None:
+                # Get file from MongoDB
+                file_doc = db.output_files.find_one({'filename': filename})
+                if file_doc:
+                    file_data = base64.b64decode(file_doc['file_data'])
+                    zip_file.writestr(filename, file_data)
+    
+    zip_buffer.seek(0)
+    
+    # Generate ZIP filename with timestamp
+    batch_id = session_data.get('current_batch_id', datetime.now().strftime('%Y%m%d_%H%M%S'))
+    zip_filename = f"Bank_Transactions_{batch_id}.zip"
+    
+    return send_file(
+        zip_buffer,
+        as_attachment=True,
+        download_name=zip_filename,
+        mimetype='application/zip'
+    )
+
+
+@app.route('/api/output-files')
+def api_get_output_files():
+    """Get list of all output files from MongoDB"""
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'MongoDB not available'}), 503
+    
+    try:
+        # Get query parameters
+        batch_id = request.args.get('batch_id')
+        limit = int(request.args.get('limit', 50))
+        
+        query = {}
+        if batch_id:
+            query['batch_id'] = batch_id
+        
+        files = list(db.output_files.find(
+            query, 
+            {'file_data': 0}  # Exclude file data from listing
+        ).sort('created_at', -1).limit(limit))
+        
+        return jsonify({
+            'files': serialize_doc(files),
+            'total': db.output_files.count_documents(query)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/output-files/<file_id>')
+def api_get_output_file(file_id):
+    """Download a specific output file by ID"""
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'MongoDB not available'}), 503
+    
+    try:
+        from bson import ObjectId
+        file_doc = db.output_files.find_one({'_id': ObjectId(file_id)})
+        if not file_doc:
+            return jsonify({'error': 'File not found'}), 404
+        
+        file_data = base64.b64decode(file_doc['file_data'])
+        buffer = io.BytesIO(file_data)
+        buffer.seek(0)
+        
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name=file_doc['filename'],
+            mimetype=file_doc.get('content_type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/output-files/batch/<batch_id>')
+def api_get_batch_files(batch_id):
+    """Get all files for a specific batch"""
+    db = get_db()
+    if db is None:
+        return jsonify({'error': 'MongoDB not available'}), 503
+    
+    try:
+        files = list(db.output_files.find(
+            {'batch_id': batch_id},
+            {'file_data': 0}
+        ).sort('created_at', -1))
+        
+        return jsonify({
+            'batch_id': batch_id,
+            'files': serialize_doc(files),
+            'count': len(files)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # ============ MONGODB REST API ENDPOINTS ============
 
@@ -1514,7 +1858,19 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 .vendor-match{background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:15px;margin-top:10px}
 .vendor-item{padding:10px;margin:5px 0;background:#fff;border:1px solid #ddd;border-radius:4px;cursor:pointer}.vendor-item:hover{border-color:#0d6efd;background:#e7f1ff}
 .audit-item{font-size:.85em;padding:5px 10px;border-left:3px solid #6c757d;margin-bottom:5px;background:#f8f9fa}
+/* Select2 customization */
+.select2-container{width:100%!important}
+.select2-container .select2-selection--single{height:38px;border:1px solid #ced4da;border-radius:0.375rem}
+.select2-container--default .select2-selection--single .select2-selection__rendered{line-height:36px;padding-left:12px}
+.select2-container--default .select2-selection--single .select2-selection__arrow{height:36px}
+.select2-dropdown{border:1px solid #ced4da;border-radius:0.375rem}
+.select2-search--dropdown .select2-search__field{border:1px solid #ced4da;border-radius:0.375rem;padding:6px 12px}
+.select2-results__option--highlighted[aria-selected]{background-color:#0d6efd!important}
 </style>
+<!-- jQuery and Select2 for searchable dropdowns -->
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 </head><body>
 <nav class="navbar navbar-dark bg-primary"><div class="container"><a class="navbar-brand" href="/"><i class="bi bi-bank"></i> Bank Transaction Posting Tool</a>
 <div class="navbar-nav ms-auto"><a class="nav-link" href="/">Upload</a><a class="nav-link active" href="/review">Review</a><a class="nav-link" href="/results">Results</a></div></div></nav>
@@ -1527,6 +1883,14 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="col-md-3"><div class="card text-center bg-warning p-3"><h2>{{ by_module.JV|length }}</h2><div>Journal Vouchers</div></div></div>
 <div class="col-md-3"><div class="card text-center bg-secondary text-white p-3"><h2>{{ by_module.UNKNOWN|length }}</h2><div>Unidentified</div></div></div>
 </div>
+
+<!-- Summary Section - Moved to Top -->
+<div class="card mb-4"><div class="card-header bg-dark text-white"><h5 class="mb-0"><i class="bi bi-calculator"></i> Summary</h5></div>
+<div class="card-body"><div class="row">
+<div class="col-md-4"><div class="card border-success"><div class="card-body text-center"><h6 class="text-muted">Total Deposits</h6><h3 class="text-success">${{ '{:,.2f}'.format(summary.total_credits) }}</h3></div></div></div>
+<div class="col-md-4"><div class="card border-danger"><div class="card-body text-center"><h6 class="text-muted">Total Withdrawals</h6><h3 class="text-danger">${{ '{:,.2f}'.format(summary.total_debits) }}</h3></div></div></div>
+<div class="col-md-4"><div class="card border-info"><div class="card-body text-center"><h6 class="text-muted">Net Cash Flow</h6><h3 class="{{ 'text-success' if summary.balance >= 0 else 'text-danger' }}">{% if summary.balance >= 0 %}↑${{ '{:,.2f}'.format(summary.balance) }}{% else %}↓${{ '{:,.2f}'.format(summary.balance|abs) }}{% endif %}</h3></div></div></div>
+</div></div></div>
 
 <div class="card mb-3 d-none" id="bulkBar"><div class="card-body bg-light">
 <div class="row align-items-center">
@@ -1573,13 +1937,6 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="tab-pane fade" id="cd">{% if by_module.CD %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>GL</th></tr></thead><tbody>{% for t in by_module.CD %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td class="text-danger">${{ '{:,.2f}'.format(t.amount|abs) }}</td><td>{{ t.gl_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No CD transactions</div>{% endif %}</div>
 <div class="tab-pane fade" id="jv">{% if by_module.JV %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>GL</th></tr></thead><tbody>{% for t in by_module.JV %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td>${{ '{:,.2f}'.format(t.amount|abs) }}</td><td>{{ t.gl_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No JV transactions</div>{% endif %}</div>
 <div class="tab-pane fade" id="unk">{% if by_module.UNKNOWN %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th></tr></thead><tbody>{% for t in by_module.UNKNOWN %}<tr class="needs-review"><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td>${{ '{:,.2f}'.format(t.amount|abs) }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-success"><i class="bi bi-check-circle"></i> All classified!</div>{% endif %}</div>
-</div></div></div>
-
-<div class="card mt-4"><div class="card-header bg-dark text-white"><h5><i class="bi bi-calculator"></i> Summary</h5></div>
-<div class="card-body"><div class="row">
-<div class="col-md-4"><div class="card border-success"><div class="card-body text-center"><h6 class="text-muted">Total Deposits</h6><h3 class="text-success">${{ '{:,.2f}'.format(summary.total_credits) }}</h3></div></div></div>
-<div class="col-md-4"><div class="card border-danger"><div class="card-body text-center"><h6 class="text-muted">Total Withdrawals</h6><h3 class="text-danger">${{ '{:,.2f}'.format(summary.total_debits) }}</h3></div></div></div>
-<div class="col-md-4"><div class="card border-info"><div class="card-body text-center"><h6 class="text-muted">Net Cash Flow</h6><h3 class="{{ 'text-success' if summary.balance >= 0 else 'text-info' }}">{% if summary.balance >= 0 %}↑${{ '{:,.2f}'.format(summary.balance) }}{% else %}↓${{ '{:,.2f}'.format(summary.balance|abs) }}{% endif %}</h3></div></div></div>
 </div></div></div>
 
 {% if audit_trail %}<div class="card mt-4"><div class="card-header"><h5><i class="bi bi-clock-history"></i> Recent Changes</h5></div>
@@ -1804,6 +2161,138 @@ function applyBulk(){
 function undoLast(){
   fetch('/undo_last',{method:'POST'}).then(r=>r.json()).then(d=>{alert(d.message);if(d.status==='success')location.reload();});
 }
+
+// Initialize Select2 for searchable dropdowns
+$(document).ready(function() {
+    // Edit Modal dropdowns
+    $('#editGL').select2({
+        placeholder: 'Search GL Code...',
+        allowClear: true,
+        dropdownParent: $('#editModal'),
+        width: '100%'
+    });
+    
+    $('#editFund').select2({
+        placeholder: 'Search Fund...',
+        allowClear: true,
+        dropdownParent: $('#editModal'),
+        width: '100%'
+    });
+    
+    $('#editPayeeSelect').select2({
+        placeholder: 'Search Customer/Vendor...',
+        allowClear: true,
+        dropdownParent: $('#editModal'),
+        width: '100%'
+    });
+    
+    // Bulk action dropdowns
+    $('#bulkGL').select2({
+        placeholder: 'GL Code...',
+        allowClear: true,
+        width: '200px'
+    });
+    
+    $('#bulkFund').select2({
+        placeholder: 'Fund...',
+        allowClear: true,
+        width: '200px'
+    });
+    
+    // Add Customer Modal dropdowns
+    $('#newCustGL').select2({
+        placeholder: 'Search GL Code...',
+        allowClear: true,
+        dropdownParent: $('#addCustomerModal'),
+        width: '100%'
+    });
+    
+    $('#newCustFund').select2({
+        placeholder: 'Search Fund...',
+        allowClear: true,
+        dropdownParent: $('#addCustomerModal'),
+        width: '100%'
+    });
+    
+    // Add Vendor Modal dropdowns
+    $('#newVendorGL').select2({
+        placeholder: 'Search GL Code...',
+        allowClear: true,
+        dropdownParent: $('#addVendorModal'),
+        width: '100%'
+    });
+    
+    $('#newVendorFund').select2({
+        placeholder: 'Search Fund...',
+        allowClear: true,
+        dropdownParent: $('#addVendorModal'),
+        width: '100%'
+    });
+    
+    // Re-initialize Select2 when modal opens (fixes display issues)
+    $('#editModal').on('shown.bs.modal', function() {
+        $('#editGL').select2({
+            placeholder: 'Search GL Code...',
+            allowClear: true,
+            dropdownParent: $('#editModal'),
+            width: '100%'
+        });
+        $('#editFund').select2({
+            placeholder: 'Search Fund...',
+            allowClear: true,
+            dropdownParent: $('#editModal'),
+            width: '100%'
+        });
+        $('#editPayeeSelect').select2({
+            placeholder: 'Search Customer/Vendor...',
+            allowClear: true,
+            dropdownParent: $('#editModal'),
+            width: '100%'
+        });
+    });
+    
+    // Re-initialize Select2 when Add Customer modal opens
+    $('#addCustomerModal').on('shown.bs.modal', function() {
+        $('#newCustGL').select2({
+            placeholder: 'Search GL Code...',
+            allowClear: true,
+            dropdownParent: $('#addCustomerModal'),
+            width: '100%'
+        });
+        $('#newCustFund').select2({
+            placeholder: 'Search Fund...',
+            allowClear: true,
+            dropdownParent: $('#addCustomerModal'),
+            width: '100%'
+        });
+    });
+    
+    // Re-initialize Select2 when Add Vendor modal opens
+    $('#addVendorModal').on('shown.bs.modal', function() {
+        $('#newVendorGL').select2({
+            placeholder: 'Search GL Code...',
+            allowClear: true,
+            dropdownParent: $('#addVendorModal'),
+            width: '100%'
+        });
+        $('#newVendorFund').select2({
+            placeholder: 'Search Fund...',
+            allowClear: true,
+            dropdownParent: $('#addVendorModal'),
+            width: '100%'
+        });
+    });
+    
+    // Handle Customer/Vendor selection to auto-fill GL and Fund
+    $('#editPayeeSelect').on('select2:select', function(e) {
+        var data = e.params.data;
+        var element = $(data.element);
+        var gl = element.data('gl');
+        var fund = element.data('fund');
+        if (gl) $('#editGL').val(gl).trigger('change');
+        if (fund) $('#editFund').val(fund).trigger('change');
+    });
+});
 </script></body></html>'''
 
 RESULTS_TEMPLATE = '''<!DOCTYPE html>
@@ -1818,7 +2307,8 @@ RESULTS_TEMPLATE = '''<!DOCTYPE html>
 <div class="container mt-4">
 <div class="card bg-success text-white mb-4"><div class="card-body text-center"><h3><i class="bi bi-check-circle"></i> Processing Complete!</h3></div></div>
 <div class="row"><div class="col-md-8">
-<div class="card"><div class="card-header"><h5><i class="bi bi-download"></i> Download Files</h5></div>
+<div class="card"><div class="card-header d-flex justify-content-between align-items-center"><h5 class="mb-0"><i class="bi bi-download"></i> Download Files</h5>
+{% if output_files %}<a href="/download_all_zip" class="btn btn-success btn-sm"><i class="bi bi-file-earmark-zip"></i> Download All as ZIP</a>{% endif %}</div>
 <div class="card-body">{% if output_files %}<div class="list-group">{% for f in output_files %}
 <a href="/download/{{ f.filename }}" class="list-group-item list-group-item-action d-flex justify-content-between"><div><i class="bi bi-file-earmark-excel text-success"></i> <strong>{{ f.filename }}</strong><br><small class="text-muted">{{ f.description }}</small></div><span class="badge bg-primary">Download</span></a>
 {% endfor %}</div>{% else %}<p class="text-muted">No files</p>{% endif %}</div></div></div>

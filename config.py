@@ -9,12 +9,15 @@ from datetime import datetime
 # Base paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
-OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 
-# Ensure directories exist
-for d in [DATA_DIR, OUTPUT_DIR, LOG_DIR]:
+# OUTPUT_DIR is now optional - files are generated in-memory by default
+# This can still be used by main.py CLI if needed
+OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
+
+# Ensure directories exist (only essential ones)
+for d in [DATA_DIR, LOG_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # Date format as per SOP
