@@ -1,0 +1,16 @@
+[
+    {"name": "HUD CDBG", "aliases": ["hud", "cdbg", "community development", "block grant"], "agency": "HUD", "cfda": "14.218", "gl_code": "4100", "fund_code": "2700"},
+    {"name": "HUD HOME", "aliases": ["home program", "home investment"], "agency": "HUD", "cfda": "14.239", "gl_code": "4100", "fund_code": "2710"},
+    {"name": "HUD Section 8", "aliases": ["section 8", "housing choice", "hcv"], "agency": "HUD", "cfda": "14.871", "gl_code": "4100", "fund_code": "2720"},
+    {"name": "HUD CoC", "aliases": ["continuum of care", "coc", "homeless"], "agency": "HUD", "cfda": "14.267", "gl_code": "4100", "fund_code": "2730"},
+    {"name": "DOE Weatherization", "aliases": ["doe", "weatherization", "wap", "energy"], "agency": "DOE", "cfda": "81.042", "gl_code": "4100", "fund_code": "2800"},
+    {"name": "DOE LIHEAP", "aliases": ["liheap", "heating assistance", "energy assistance"], "agency": "DOE", "cfda": "93.568", "gl_code": "4100", "fund_code": "2810"},
+    {"name": "HHS Head Start", "aliases": ["head start", "early head start", "hhs"], "agency": "HHS", "cfda": "93.600", "gl_code": "4100", "fund_code": "2900"},
+    {"name": "HHS TANF", "aliases": ["tanf", "temporary assistance", "welfare"], "agency": "HHS", "cfda": "93.558", "gl_code": "4100", "fund_code": "2910"},
+    {"name": "HHS CSBG", "aliases": ["csbg", "community services"], "agency": "HHS", "cfda": "93.569", "gl_code": "4100", "fund_code": "2920"},
+    {"name": "FEMA Emergency Management", "aliases": ["fema", "emergency management", "empg"], "agency": "FEMA", "cfda": "97.042", "gl_code": "4100", "fund_code": "3000"},
+    {"name": "USDA SNAP", "aliases": ["snap", "food stamps", "usda"], "agency": "USDA", "cfda": "10.551", "gl_code": "4100", "fund_code": "3100"},
+    {"name": "DOL WIOA", "aliases": ["wioa", "workforce", "job training", "dol"], "agency": "DOL", "cfda": "17.258", "gl_code": "4100", "fund_code": "3200"},
+    {"name": "EPA Clean Water", "aliases": ["epa", "clean water", "cwsrf"], "agency": "EPA", "cfda": "66.458", "gl_code": "4100", "fund_code": "3300"},
+    {"name": "Treasury ARPA", "aliases": ["arpa", "american rescue", "slfrf", "treasury"], "agency": "Treasury", "cfda": "21.027", "gl_code": "4100", "fund_code": "3400"}
+]

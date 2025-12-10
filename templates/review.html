@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+{% block title %}Review Transactions{% endblock %}
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card stat-card bg-success text-white">
+            <div class="stat-value">{{ by_module.CR|length }}</div>
+            <div>Cash Receipts</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card bg-danger text-white">
+            <div class="stat-value">{{ by_module.CD|length }}</div>
+            <div>Cash Disbursements</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card bg-warning">
+            <div class="stat-value">{{ by_module.JV|length }}</div>
+            <div>Journal Vouchers</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card bg-secondary text-white">
+            <div class="stat-value">{{ by_module.UNKNOWN|length }}</div>
+            <div>Unidentified</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5><i class="bi bi-list-check"></i> Review Transactions</h5>
+        <form action="/process" method="post">
+            <button type="submit" class="btn btn-primary">
+                <i class="bi bi-gear"></i> Generate Output Files
+            </button>
+        </form>
+    </div>
+    <div class="card-body">
+        <ul class="nav nav-tabs" id="moduleTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="all-tab" data-bs-toggle="tab" data-bs-target="#all" type="button" role="tab">All ({{ transactions|length }})</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="cr-tab" data-bs-toggle="tab" data-bs-target="#cr" type="button" role="tab">CR ({{ by_module.CR|length }})</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="cd-tab" data-bs-toggle="tab" data-bs-target="#cd" type="button" role="tab">CD ({{ by_module.CD|length }})</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="jv-tab" data-bs-toggle="tab" data-bs-target="#jv" type="button" role="tab">JV ({{ by_module.JV|length }})</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="unknown-tab" data-bs-toggle="tab" data-bs-target="#unknown" type="button" role="tab">Unknown ({{ by_module.UNKNOWN|length }})</button>
+            </li>
+        </ul>
+        
+        <div class="tab-content mt-3">
+            <!-- ALL Tab -->
+            <div class="tab-pane fade show active" id="all" role="tabpanel">
+                <table class="table table-hover table-sm">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>Module</th>
+                            <th>GL Code</th>
+                            <th>Confidence</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for txn in transactions %}
+                        <tr class="{{ 'needs-review' if txn.confidence_level in ['low', 'none'] }}">
+                            <td>{{ txn.date }}</td>
+                            <td title="{{ txn.description }}">{{ txn.description[:40] }}{% if txn.description|length > 40 %}...{% endif %}</td>
+                            <td class="{{ 'text-success' if txn.amount > 0 else 'text-danger' }}">
+                                ${{ '{:,.2f}'.format(txn.amount|abs) }}
+                            </td>
+                            <td><span class="badge bg-{{ 'success' if txn.module == 'CR' else 'danger' if txn.module == 'CD' else 'warning' if txn.module == 'JV' else 'secondary' }}">{{ txn.module }}</span></td>
+                            <td>{{ txn.gl_code or '-' }}</td>
+                            <td class="confidence-{{ txn.confidence_level }}">{{ txn.confidence_level }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary edit-btn" data-index="{{ loop.index0 }}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- CR Tab -->
+            <div class="tab-pane fade" id="cr" role="tabpanel">
+                {% if by_module.CR %}
+                <table class="table table-hover table-sm">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>GL Code</th>
+                            <th>Confidence</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for txn in by_module.CR %}
+                        <tr>
+                            <td>{{ txn.date }}</td>
+                            <td title="{{ txn.description }}">{{ txn.description[:40] }}{% if txn.description|length > 40 %}...{% endif %}</td>
+                            <td class="text-success">${{ '{:,.2f}'.format(txn.amount|abs) }}</td>
+                            <td>{{ txn.gl_code or '-' }}</td>
+                            <td class="confidence-{{ txn.confidence_level }}">{{ txn.confidence_level }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary edit-btn" data-index="{{ loop.index0 }}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="alert alert-info">No Cash Receipt transactions</div>
+                {% endif %}
+            </div>
+            
+            <!-- CD Tab -->
+            <div class="tab-pane fade" id="cd" role="tabpanel">
+                {% if by_module.CD %}
+                <table class="table table-hover table-sm">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>GL Code</th>
+                            <th>Confidence</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for txn in by_module.CD %}
+                        <tr>
+                            <td>{{ txn.date }}</td>
+                            <td title="{{ txn.description }}">{{ txn.description[:40] }}{% if txn.description|length > 40 %}...{% endif %}</td>
+                            <td class="text-danger">${{ '{:,.2f}'.format(txn.amount|abs) }}</td>
+                            <td>{{ txn.gl_code or '-' }}</td>
+                            <td class="confidence-{{ txn.confidence_level }}">{{ txn.confidence_level }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary edit-btn" data-index="{{ loop.index0 }}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="alert alert-info">No Cash Disbursement transactions</div>
+                {% endif %}
+            </div>
+            
+            <!-- JV Tab -->
+            <div class="tab-pane fade" id="jv" role="tabpanel">
+                {% if by_module.JV %}
+                <table class="table table-hover table-sm">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>GL Code</th>
+                            <th>Confidence</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for txn in by_module.JV %}
+                        <tr>
+                            <td>{{ txn.date }}</td>
+                            <td title="{{ txn.description }}">{{ txn.description[:40] }}{% if txn.description|length > 40 %}...{% endif %}</td>
+                            <td>${{ '{:,.2f}'.format(txn.amount|abs) }}</td>
+                            <td>{{ txn.gl_code or '-' }}</td>
+                            <td class="confidence-{{ txn.confidence_level }}">{{ txn.confidence_level }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary edit-btn" data-index="{{ loop.index0 }}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="alert alert-info">No Journal Voucher transactions</div>
+                {% endif %}
+            </div>
+            
+            <!-- Unknown Tab -->
+            <div class="tab-pane fade" id="unknown" role="tabpanel">
+                {% if by_module.UNKNOWN %}
+                <table class="table table-hover table-sm">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>GL Code</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for txn in by_module.UNKNOWN %}
+                        <tr class="needs-review">
+                            <td>{{ txn.date }}</td>
+                            <td title="{{ txn.description }}">{{ txn.description[:40] }}{% if txn.description|length > 40 %}...{% endif %}</td>
+                            <td>${{ '{:,.2f}'.format(txn.amount|abs) }}</td>
+                            <td>{{ txn.gl_code or '-' }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary edit-btn" data-index="{{ loop.index0 }}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="alert alert-success">All transactions classified!</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Balance Summary Card -->
+<div class="card mt-4">
+    <div class="card-header bg-dark text-white">
+        <h5><i class="bi bi-calculator"></i> Bank Statement Summary</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card border-success">
+                    <div class="card-body text-center">
+                        <h6 class="text-muted">Total Deposits (Money In)</h6>
+                        <h3 class="text-success">${{ '{:,.2f}'.format(summary.total_credits) }}</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card border-danger">
+                    <div class="card-body text-center">
+                        <h6 class="text-muted">Total Withdrawals (Money Out)</h6>
+                        <h3 class="text-danger">${{ '{:,.2f}'.format(summary.total_debits) }}</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card border-{{ 'success' if summary.balance >= 0 else 'info' }}">
+                    <div class="card-body text-center">
+                        <h6 class="text-muted">Net Cash Flow</h6>
+                        <h3 class="{{ 'text-success' if summary.balance >= 0 else 'text-info' }}">
+                            {% if summary.balance >= 0 %}
+                            <i class="bi bi-arrow-up-circle text-success"></i> ${{ '{:,.2f}'.format(summary.balance) }}
+                            {% else %}
+                            <i class="bi bi-arrow-down-circle text-info"></i> -${{ '{:,.2f}'.format(summary.balance|abs) }}
+                            {% endif %}
+                        </h3>
+                        {% if summary.balance >= 0 %}
+                        <small class="text-success">Bank balance increased</small>
+                        {% else %}
+                        <small class="text-info">Bank balance decreased</small>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="alert alert-light mt-3 mb-0">
+            <small><i class="bi bi-info-circle"></i> <strong>Note:</strong> This shows net cash flow from the bank statement. When journal entries are generated, each entry will be balanced (Dr = Cr).</small>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Modal -->
+<div class="modal fade" id="editModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Transaction</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editForm">
+                    <input type="hidden" id="editIndex">
+                    <div class="mb-3">
+                        <label class="form-label">Module</label>
+                        <select class="form-select" id="editModule">
+                            <option value="CR">Cash Receipt (CR)</option>
+                            <option value="CD">Cash Disbursement (CD)</option>
+                            <option value="JV">Journal Voucher (JV)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">GL Code</label>
+                        <input type="text" class="form-control" id="editGLCode">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Fund Code</label>
+                        <input type="text" class="form-control" id="editFundCode">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Payee/Vendor</label>
+                        <input type="text" class="form-control" id="editPayee">
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="saveEdit">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const editModal = new bootstrap.Modal(document.getElementById('editModal'));
+
+document.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        const index = this.dataset.index;
+        document.getElementById('editIndex').value = index;
+        editModal.show();
+    });
+});
+
+document.getElementById('saveEdit').addEventListener('click', function() {
+    const data = {
+        index: parseInt(document.getElementById('editIndex').value),
+        module: document.getElementById('editModule').value,
+        gl_code: document.getElementById('editGLCode').value,
+        fund_code: document.getElementById('editFundCode').value,
+        payee: document.getElementById('editPayee').value
+    };
+    
+    fetch('/update_transaction', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    })
+    .then(response => response.json())
+    .then(result => {
+        if (result.status === 'success') {
+            location.reload();
+        } else {
+            alert(result.message);
+        }
+    });
+});
+</script>
+{% endblock %}

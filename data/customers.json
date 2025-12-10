@@ -1,0 +1,8 @@
+[
+    {"name": "ABC Corporation", "aliases": ["abc corp", "abc"], "type": "customer", "gl_code": "4000", "fund_code": "1000"},
+    {"name": "XYZ Industries", "aliases": ["xyz ind", "xyz"], "type": "customer", "gl_code": "4000", "fund_code": "1000"},
+    {"name": "Smith & Associates", "aliases": ["smith assoc", "smith"], "type": "customer", "gl_code": "4000", "fund_code": "1000"},
+    {"name": "Johnson Holdings", "aliases": ["johnson", "jh"], "type": "customer", "gl_code": "4000", "fund_code": "1000"},
+    {"name": "Metro Properties", "aliases": ["metro prop", "metro"], "type": "tenant", "gl_code": "4200", "fund_code": "1000"},
+    {"name": "Downtown Retail", "aliases": ["downtown", "dtr"], "type": "tenant", "gl_code": "4200", "fund_code": "1000"}
+]

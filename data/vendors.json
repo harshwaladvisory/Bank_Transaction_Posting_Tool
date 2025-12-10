@@ -1,0 +1,21 @@
+[
+    {"name": "ADP", "aliases": ["adp payroll", "adp fees", "adp tax"], "category": "payroll", "gl_code": "7200", "fund_code": "2700"},
+    {"name": "Paychex", "aliases": ["paychex payroll", "paychex fees"], "category": "payroll", "gl_code": "7200", "fund_code": "2700"},
+    {"name": "Gusto", "aliases": ["gusto payroll", "gusto fees"], "category": "payroll", "gl_code": "7200", "fund_code": "2700"},
+    {"name": "Intuit Payroll", "aliases": ["intuit", "quickbooks payroll"], "category": "payroll", "gl_code": "7200", "fund_code": "2700"},
+    {"name": "IRS", "aliases": ["irs eftps", "internal revenue", "federal tax"], "category": "tax", "gl_code": "7400", "fund_code": "2700"},
+    {"name": "State Tax Board", "aliases": ["state tax", "franchise tax", "edd"], "category": "tax", "gl_code": "7410", "fund_code": "2700"},
+    {"name": "Electric Company", "aliases": ["electric", "power", "energy", "edison", "pge"], "category": "utilities", "gl_code": "7310", "fund_code": "1000"},
+    {"name": "Gas Company", "aliases": ["gas", "natural gas", "socal gas"], "category": "utilities", "gl_code": "7310", "fund_code": "1000"},
+    {"name": "Water District", "aliases": ["water", "water district", "sewer"], "category": "utilities", "gl_code": "7310", "fund_code": "1000"},
+    {"name": "AT&T", "aliases": ["at&t", "att"], "category": "utilities", "gl_code": "7310", "fund_code": "1000"},
+    {"name": "Verizon", "aliases": ["verizon", "vzw"], "category": "utilities", "gl_code": "7310", "fund_code": "1000"},
+    {"name": "Staples", "aliases": ["staples"], "category": "office_supplies", "gl_code": "7320", "fund_code": "1000"},
+    {"name": "Office Depot", "aliases": ["office depot", "officemax"], "category": "office_supplies", "gl_code": "7320", "fund_code": "1000"},
+    {"name": "Amazon", "aliases": ["amazon", "amzn", "aws"], "category": "office_supplies", "gl_code": "7320", "fund_code": "1000"},
+    {"name": "FedEx", "aliases": ["fedex", "federal express"], "category": "shipping", "gl_code": "7330", "fund_code": "1000"},
+    {"name": "UPS", "aliases": ["ups", "united parcel"], "category": "shipping", "gl_code": "7330", "fund_code": "1000"},
+    {"name": "Bank of America", "aliases": ["bank of america", "bofa"], "category": "bank", "gl_code": "7500", "fund_code": "1000"},
+    {"name": "Wells Fargo", "aliases": ["wells fargo", "wf"], "category": "bank", "gl_code": "7500", "fund_code": "1000"},
+    {"name": "PNC Bank", "aliases": ["pnc", "pnc bank"], "category": "bank", "gl_code": "7500", "fund_code": "1000"}
+]

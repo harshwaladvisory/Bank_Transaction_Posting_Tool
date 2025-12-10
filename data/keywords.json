@@ -1,0 +1,192 @@
+{
+    "classification_rules": {
+        "CR": {
+            "description": "Cash Receipts - Revenue, deposits, customer payments, grants",
+            "keywords": [
+                "deposit", "credit", "receipt", "received", "income", "revenue",
+                "interest credit", "interest income", "int credit", "int income",
+                "dividend", "refund", "reimbursement", "rebate",
+                "grant", "hud", "doe", "hhs", "epa", "fema", "usda", "dol",
+                "treasury", "federal", "state grant", "city grant",
+                "rent received", "rental income", "lease payment",
+                "donation", "contribution", "gift", "bequest",
+                "membership", "dues", "subscription",
+                "sales", "service revenue", "consulting fee",
+                "insurance claim", "settlement", "award",
+                "transfer in", "incoming transfer", "wire in",
+                "ach credit", "ach deposit", "direct deposit",
+                "customer payment", "client payment", "invoice payment",
+                "collection", "accounts receivable", "ar payment",
+                "royalty", "licensing fee", "franchise fee",
+                "miscellaneous income", "misc income", "other income"
+            ],
+            "patterns": [
+                "(?i)deposit.*from",
+                "(?i)credit.*memo",
+                "(?i)payment.*received",
+                "(?i)grant.*award",
+                "(?i)hud.*draw",
+                "(?i)interest.*earned"
+            ]
+        },
+        "CD": {
+            "description": "Cash Disbursements - Vendor payments, payroll, taxes, expenses",
+            "keywords": [
+                "payment", "paid", "check", "cheque", "withdrawal", "debit",
+                "payroll", "salary", "wage", "compensation", "bonus",
+                "adp", "paychex", "gusto", "intuit payroll", "quickbooks payroll",
+                "irs", "eftps", "federal tax", "state tax", "local tax",
+                "941", "940", "w2", "1099", "tax payment", "estimated tax",
+                "vendor", "supplier", "purchase", "procurement",
+                "utility", "electric", "gas", "water", "sewer", "trash",
+                "rent paid", "lease payment", "mortgage",
+                "insurance premium", "health insurance", "liability insurance",
+                "professional fee", "legal fee", "accounting fee", "audit fee",
+                "consultant", "contractor", "subcontractor",
+                "office supplies", "supplies", "equipment",
+                "travel", "mileage", "per diem", "lodging", "airfare",
+                "subscription", "software", "license fee",
+                "maintenance", "repair", "service contract",
+                "shipping", "freight", "postage", "courier",
+                "advertising", "marketing", "promotion",
+                "training", "seminar", "conference", "registration",
+                "dues", "membership fee", "association fee",
+                "loan payment", "principal", "interest payment",
+                "credit card", "amex", "visa", "mastercard", "discover",
+                "ach debit", "ach payment", "wire out", "wire transfer",
+                "bill pay", "autopay", "recurring payment"
+            ],
+            "patterns": [
+                "(?i)payroll.*transfer",
+                "(?i)irs.*eftps",
+                "(?i)tax.*payment",
+                "(?i)vendor.*payment",
+                "(?i)check.*#",
+                "(?i)ach.*debit"
+            ]
+        },
+        "JV": {
+            "description": "Journal Voucher - Bank fees, interest, corrections, transfers",
+            "keywords": [
+                "bank fee", "service charge", "monthly fee", "maintenance fee",
+                "wire fee", "transfer fee", "ach fee", "overdraft fee",
+                "nsf fee", "returned item fee", "stop payment fee",
+                "analysis charge", "account analysis", "treasury management",
+                "interest charge", "finance charge", "late fee",
+                "correction", "adjustment", "reversal", "void",
+                "transfer between", "internal transfer", "book transfer",
+                "reclassification", "reclass", "journal entry",
+                "accrual", "prepaid", "deferred",
+                "depreciation", "amortization",
+                "allowance", "reserve", "provision",
+                "write off", "write-off", "bad debt",
+                "gain", "loss", "unrealized",
+                "foreign exchange", "fx", "currency",
+                "intercompany", "due to", "due from",
+                "clearing", "suspense", "unidentified"
+            ],
+            "patterns": [
+                "(?i)bank.*charge",
+                "(?i)service.*fee",
+                "(?i)monthly.*maintenance",
+                "(?i)transfer.*between",
+                "(?i)correction.*entry"
+            ]
+        }
+    },
+    "vendor_keywords": {
+        "payroll_vendors": [
+            "adp", "paychex", "gusto", "intuit", "quickbooks", "ceridian",
+            "paylocity", "paycom", "paycor", "workday", "kronos", "ultimate software"
+        ],
+        "tax_agencies": [
+            "irs", "eftps", "internal revenue", "department of revenue",
+            "franchise tax", "state tax", "city tax", "employment development"
+        ],
+        "utilities": [
+            "electric", "power", "energy", "gas company", "water district",
+            "sewer", "waste management", "trash", "sanitation", "telecom",
+            "at&t", "verizon", "comcast", "spectrum", "cox"
+        ],
+        "insurance": [
+            "insurance", "aetna", "cigna", "united health", "blue cross",
+            "anthem", "humana", "kaiser", "metlife", "prudential", "aflac"
+        ],
+        "banks_financial": [
+            "bank of america", "wells fargo", "chase", "citibank", "pnc",
+            "us bank", "td bank", "capital one", "truist", "fifth third"
+        ],
+        "credit_cards": [
+            "american express", "amex", "visa", "mastercard", "discover"
+        ],
+        "office_supplies": [
+            "staples", "office depot", "amazon", "costco", "walmart", "target"
+        ],
+        "professional_services": [
+            "law firm", "attorney", "legal", "cpa", "accountant", "consulting"
+        ]
+    },
+    "grant_keywords": {
+        "federal_agencies": [
+            "hud", "housing urban development", "doe", "department of energy",
+            "hhs", "health human services", "epa", "environmental protection",
+            "fema", "emergency management", "usda", "agriculture",
+            "dol", "department of labor", "ed", "department of education",
+            "dot", "transportation", "va", "veterans affairs",
+            "nsf", "national science", "nih", "national institutes health",
+            "doj", "justice", "dhs", "homeland security"
+        ],
+        "grant_terms": [
+            "grant", "award", "cfda", "uei", "duns", "sam registration",
+            "drawdown", "reimbursement", "advance", "cost share", "match",
+            "indirect cost", "fringe", "f&a", "overhead"
+        ]
+    },
+    "amount_patterns": {
+        "recurring_payroll": {
+            "description": "Regular payroll amounts that repeat",
+            "frequency": ["weekly", "biweekly", "semi-monthly", "monthly"]
+        },
+        "tax_payments": {
+            "description": "Quarterly estimated tax payments",
+            "frequency": ["quarterly"]
+        }
+    },
+    "gl_code_mappings": {
+        "payroll": {"gl": "7200", "fund": "2700", "description": "Payroll Expense"},
+        "payroll_tax": {"gl": "7210", "fund": "2700", "description": "Payroll Taxes"},
+        "payroll_benefits": {"gl": "7220", "fund": "2700", "description": "Employee Benefits"},
+        "federal_tax": {"gl": "7400", "fund": "2700", "description": "Federal Taxes"},
+        "state_tax": {"gl": "7410", "fund": "2700", "description": "State Taxes"},
+        "interest_income": {"gl": "4600", "fund": "1000", "description": "Interest Income"},
+        "interest_expense": {"gl": "8100", "fund": "1000", "description": "Interest Expense"},
+        "bank_fees": {"gl": "7500", "fund": "1000", "description": "Bank Service Charges"},
+        "rent_expense": {"gl": "7300", "fund": "1000", "description": "Rent Expense"},
+        "rent_income": {"gl": "4200", "fund": "1000", "description": "Rental Income"},
+        "utilities": {"gl": "7310", "fund": "1000", "description": "Utilities"},
+        "office_supplies": {"gl": "7320", "fund": "1000", "description": "Office Supplies"},
+        "professional_fees": {"gl": "7600", "fund": "1000", "description": "Professional Fees"},
+        "insurance": {"gl": "7700", "fund": "1000", "description": "Insurance"},
+        "travel": {"gl": "7800", "fund": "1000", "description": "Travel & Entertainment"},
+        "grant_revenue": {"gl": "4100", "fund": "varies", "description": "Grant Revenue"},
+        "donation": {"gl": "4300", "fund": "1000", "description": "Contributions & Donations"},
+        "miscellaneous": {"gl": "7900", "fund": "1000", "description": "Miscellaneous Expense"}
+    },
+    "bank_gl_accounts": {
+        "default": "1070",
+        "operating": "1070",
+        "payroll": "1071",
+        "savings": "1080",
+        "money_market": "1085",
+        "petty_cash": "1010"
+    },
+    "fund_codes": {
+        "general": "1000",
+        "restricted": "2000",
+        "grant_hud": "2700",
+        "grant_doe": "2800",
+        "grant_hhs": "2900",
+        "capital": "3000",
+        "endowment": "4000"
+    }
+}

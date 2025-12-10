@@ -1,0 +1,20 @@
+# Bank Transaction Posting Tool - Dependencies
+# Harshwal Consulting Services
+
+# Core data processing
+pandas>=1.5.0
+openpyxl>=3.0.0
+
+# PDF processing
+pdfplumber>=0.7.0
+
+# OCR support (optional - for scanned PDFs)
+pytesseract>=0.3.10
+pdf2image>=1.16.0
+
+# Web interface
+flask>=2.0.0
+werkzeug>=2.0.0
+
+# Utilities
+python-dateutil>=2.8.0

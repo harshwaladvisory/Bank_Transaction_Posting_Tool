@@ -1,0 +1,21 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+
+# Uploads and outputs (user data)
+uploads/
+outputs/
+
+# Custom data
+custom_master_data.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
