@@ -211,7 +211,7 @@ Examples:
     
     if args.web:
         print("Starting web interface...")
-        print("Open http://127.0.0.1:5000 in your browser")
+        print("Open http://127.0.0.1:8587 in your browser")
         from app import app
         app.run(debug=True)
         return

@@ -2324,8 +2324,8 @@ if __name__ == '__main__':
     print("="*60)
     print("  Bank Transaction Posting Tool - Enhanced with MongoDB")
     print("="*60)
-    print(f"  Web Interface: http://127.0.0.1:5000")
-    print(f"  API Endpoint:  http://127.0.0.1:5000/api/")
+    print(f"  Web Interface: http://127.0.0.1:8587")
+    print(f"  API Endpoint:  http://127.0.0.1:8587/api/")
     print("-"*60)
     if mongodb_ready:
         print(f"  ✓ MongoDB Connected: {MONGODB_URI}{MONGODB_DATABASE}")
@@ -2360,4 +2360,4 @@ if __name__ == '__main__':
     print("    GET  /api/audit-logs      - View audit logs")
     print("    POST /api/sync/master-data - Sync to MongoDB")
     print("="*60)
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=8587)
