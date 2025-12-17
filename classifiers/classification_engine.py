@@ -62,18 +62,28 @@ class ClassificationEngine:
             history_result['classifier'] = 'history'
             history_result['priority'] = 1
             results['classifications'].append(history_result)
-        
-        # 2. Vendor matching (for expenses)
-        if amount < 0:  # Debit/Expense
+
+        # 2. Check for refunds/credits (CRITICAL FIX for vendor refunds)
+        is_refund = any(keyword in description.lower() for keyword in ['refund', 'credit memo', 'return', 'reversal', 'credited'])
+
+        # 3. Vendor matching (for expenses AND refunds)
+        if amount < 0 or is_refund:  # Debit/Expense OR Refund
             vendor_result = self.vendor_matcher.match(description)
             if vendor_result:
                 vendor_result['classifier'] = 'vendor'
                 vendor_result['priority'] = 2
-                vendor_result['module'] = 'CD'  # Cash Disbursement
+                vendor_result['module'] = 'CD'  # Cash Disbursement (negative for refunds)
+
+                # If it's a refund, make amount negative for CD
+                if is_refund and amount > 0:
+                    vendor_result['is_refund'] = True
+                    vendor_result['original_amount'] = amount
+                    vendor_result['adjusted_amount'] = -amount  # Make negative for CD
+
                 results['classifications'].append(vendor_result)
-        
-        # 3. Customer/Grant matching (for revenue)
-        if amount > 0:  # Credit/Revenue
+
+        # 4. Customer/Grant matching (for revenue, but not if it's a vendor refund)
+        if amount > 0 and not is_refund:  # Credit/Revenue (excluding refunds)
             customer_result = self.customer_matcher.match(description)
             if customer_result:
                 customer_result['classifier'] = 'customer'

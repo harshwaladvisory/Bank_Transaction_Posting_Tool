@@ -34,42 +34,98 @@ from classifiers import ClassificationEngine
 from processors import ModuleRouter, EntryBuilder, OutputGenerator
 
 app = Flask(__name__)
-app.secret_key = 'bank_posting_tool_secret_key_2024'
-app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
+
+# SECURITY FIX: Use environment variable for secret key
+import secrets as secrets_module
+app.secret_key = os.environ.get('SECRET_KEY', secrets_module.token_hex(32))
+
+# Warn if using default secret key
+if 'SECRET_KEY' not in os.environ:
+    print("⚠️  WARNING: SECRET_KEY environment variable not set!")
+    print("   Using auto-generated key. Sessions will not persist across restarts.")
+    print("   For production, set: export SECRET_KEY='your-secret-key-here'")
+
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 # MongoDB Configuration
 MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
 MONGODB_DATABASE = os.environ.get('MONGODB_DATABASE', 'bank_posting_tool')
 
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-# Note: Output files are now stored in memory, no local output directory needed
-
-CUSTOM_DATA_FILE = os.path.join(os.path.dirname(__file__), 'custom_master_data.json')
-
-session_data = {'transactions': [], 'classified': [], 'audit_trail': [], 'output_files': [], 'current_batch_id': None}
+# Note: Files are now processed in-memory, no local upload or output directory needed
+# REMOVED: Global session_data (replaced with per-user sessions in MongoDB)
 
 # ============ MONGODB CONNECTION ============
 
+# Global MongoDB client (initialized lazily)
+_mongo_client = None
+_mongo_db = None
+_mongo_connection_failed = False
+
 def get_db():
-    """Get MongoDB database connection"""
+    """Get MongoDB database connection (lazy initialization with caching and retry)"""
+    global _mongo_client, _mongo_db, _mongo_connection_failed
+
     if not MONGODB_AVAILABLE:
         return None
+
+    # If connection previously failed, retry every 5 minutes
+    if _mongo_connection_failed:
+        if not hasattr(get_db, 'last_retry_time'):
+            get_db.last_retry_time = datetime.now()
+
+        # Check if 5 minutes have passed since last retry
+        time_since_last_retry = (datetime.now() - get_db.last_retry_time).total_seconds()
+        if time_since_last_retry > 300:  # 5 minutes
+            print("Retrying MongoDB connection (5 minutes since last attempt)...")
+            _mongo_connection_failed = False  # Allow retry
+            get_db.last_retry_time = datetime.now()
+        else:
+            return None
+
+    # Return cached connection if available
+    if _mongo_db is not None:
+        try:
+            # Test connection is still alive
+            _mongo_client.admin.command('ping')
+            return _mongo_db
+        except:
+            # Connection lost, retry
+            print("MongoDB connection lost, reconnecting...")
+            _mongo_db = None
+            _mongo_client = None
+
+    # Try to establish connection (only once at startup or first request)
     try:
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        client.admin.command('ping')  # Test connection
-        return client[MONGODB_DATABASE]
+        _mongo_client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=2000,  # Reduced from 5000ms to 2000ms
+            connectTimeoutMS=2000,
+            socketTimeoutMS=2000
+        )
+        # Test connection with quick timeout
+        _mongo_client.admin.command('ping')
+        _mongo_db = _mongo_client[MONGODB_DATABASE]
+        print(f"✓ MongoDB connected: {MONGODB_URI}{MONGODB_DATABASE}")
+        return _mongo_db
     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-        print(f"MongoDB connection error: {e}")
+        print(f"✗ MongoDB connection failed: {e}")
+        print(f"  → Application will run with static data only")
+        _mongo_connection_failed = True
+        return None
+    except Exception as e:
+        print(f"✗ MongoDB error: {e}")
+        _mongo_connection_failed = True
         return None
 
 def init_mongodb():
-    """Initialize MongoDB collections and indexes"""
+    """Initialize MongoDB collections and indexes (lazy, non-blocking)"""
     db = get_db()
     if db is None:
-        print("MongoDB not available - using local storage only")
+        print("  → Application running without MongoDB (using static data)")
         return False
-    
+
     try:
         # Create collections if they don't exist
         collections = ['transactions', 'gl_codes', 'fund_codes', 'vendors', 'customers', 'batches', 'audit_logs', 'output_files']
@@ -77,26 +133,27 @@ def init_mongodb():
         for coll in collections:
             if coll not in existing:
                 db.create_collection(coll)
-        
-        # Create indexes
-        db.transactions.create_index([('batch_id', 1)])
-        db.transactions.create_index([('date', -1)])
-        db.transactions.create_index([('module', 1)])
-        db.transactions.create_index([('status', 1)])
-        db.gl_codes.create_index([('code', 1)], unique=True)
-        db.fund_codes.create_index([('code', 1)], unique=True)
-        db.vendors.create_index([('name', 1)])
-        db.customers.create_index([('name', 1)])
-        db.batches.create_index([('created_at', -1)])
-        db.audit_logs.create_index([('timestamp', -1)])
-        db.output_files.create_index([('created_at', -1)])
-        db.output_files.create_index([('batch_id', 1)])
-        
-        print(f"MongoDB initialized: {MONGODB_URI}{MONGODB_DATABASE}")
+
+        # Create indexes (with background=True to avoid blocking)
+        db.transactions.create_index([('batch_id', 1)], background=True)
+        db.transactions.create_index([('date', -1)], background=True)
+        db.transactions.create_index([('module', 1)], background=True)
+        db.transactions.create_index([('status', 1)], background=True)
+        db.gl_codes.create_index([('code', 1)], unique=True, background=True)
+        db.fund_codes.create_index([('code', 1)], unique=True, background=True)
+        db.vendors.create_index([('name', 1)], background=True)
+        db.customers.create_index([('name', 1)], background=True)
+        db.batches.create_index([('created_at', -1)], background=True)
+        db.audit_logs.create_index([('timestamp', -1)], background=True)
+        db.output_files.create_index([('created_at', -1)], background=True)
+        db.output_files.create_index([('batch_id', 1)], background=True)
+
+        print(f"  → MongoDB collections and indexes initialized")
         return True
     except Exception as e:
-        print(f"MongoDB initialization error: {e}")
-        return False
+        print(f"  → MongoDB initialization warning: {e}")
+        # Don't return False - connection works, just initialization had issues
+        return True
 
 def serialize_doc(doc):
     """Convert MongoDB document to JSON-serializable dict"""
@@ -120,8 +177,9 @@ def serialize_doc(doc):
         return result
     return doc
 
-# Initialize MongoDB on startup
-mongodb_ready = init_mongodb() if MONGODB_AVAILABLE else False
+# MongoDB will be initialized lazily on first use (non-blocking startup)
+# This prevents the app from hanging if MongoDB is unavailable
+mongodb_ready = False
 
 # ============ COMPLETE CHART OF ACCOUNTS FROM CLIENT ============
 
@@ -481,31 +539,130 @@ CUSTOMERS = [
     {'name': 'July 4th Event', 'gl_code': '4100', 'fund': 'July 4th', 'type': 'Customer'},
 ]
 
-def load_custom_data():
-    if os.path.exists(CUSTOM_DATA_FILE):
-        try:
-            with open(CUSTOM_DATA_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            pass
-    return {'vendors': [], 'customers': []}
-
-def save_custom_data(data):
-    with open(CUSTOM_DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
-
 def get_all_vendors():
-    custom = load_custom_data()
-    return VENDORS + custom.get('vendors', [])
+    """Get all vendors from MongoDB or fallback to static list"""
+    db = get_db()
+    if db is not None:
+        try:
+            vendors = list(db.vendors.find({}, {'_id': 0}))
+            if vendors:
+                return vendors
+        except Exception as e:
+            print(f"Error loading vendors from MongoDB: {e}")
+    return VENDORS
 
 def get_all_customers():
-    custom = load_custom_data()
-    return CUSTOMERS + custom.get('customers', [])
+    """Get all customers from MongoDB or fallback to static list"""
+    db = get_db()
+    if db is not None:
+        try:
+            customers = list(db.customers.find({}, {'_id': 0}))
+            if customers:
+                return customers
+        except Exception as e:
+            print(f"Error loading customers from MongoDB: {e}")
+    return CUSTOMERS
 
 SUPPORTED_EXTENSIONS = {'.pdf', '.xlsx', '.xls', '.csv'}
 
 def allowed_file(filename):
     return os.path.splitext(filename)[1].lower() in SUPPORTED_EXTENSIONS
+
+def get_user_session_id():
+    """Get or create unique session ID for current user"""
+    import uuid
+    if 'user_session_id' not in session:
+        session['user_session_id'] = str(uuid.uuid4())
+    return session['user_session_id']
+
+def get_user_session_data():
+    """Get session data for current user from MongoDB or fallback to session cookie"""
+    session_id = get_user_session_id()
+    db = get_db()
+
+    if db is not None:
+        try:
+            session_doc = db.user_sessions.find_one({'session_id': session_id})
+            if session_doc:
+                return session_doc.get('data', {})
+        except Exception as e:
+            print(f"Error loading user session: {e}")
+
+    # Fallback to Flask session (less secure, for compatibility)
+    return session.get('session_data', {'transactions': [], 'classified': [], 'audit_trail': [], 'output_files': []})
+
+def save_user_session_data(data):
+    """Save session data for current user to MongoDB"""
+    session_id = get_user_session_id()
+    db = get_db()
+
+    if db is not None:
+        try:
+            db.user_sessions.update_one(
+                {'session_id': session_id},
+                {
+                    '$set': {
+                        'session_id': session_id,
+                        'data': data,
+                        'updated_at': datetime.now(),
+                        'user_agent': request.headers.get('User-Agent', ''),
+                        'ip_address': request.remote_addr
+                    }
+                },
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            print(f"Error saving user session: {e}")
+
+    # Fallback to Flask session
+    session['session_data'] = data
+    return True
+
+def generate_transaction_hash(txn):
+    """Generate unique hash for duplicate detection"""
+    import hashlib
+    # Create hash from date, amount, description, and check number
+    key = f"{txn.get('date', '')}|{txn.get('amount', 0)}|{txn.get('description', '')}|{txn.get('check_number', '')}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+def check_for_duplicates(transactions):
+    """Check for duplicate transactions in MongoDB and within current batch"""
+    db = get_db()
+    duplicates_found = []
+    seen_in_batch = set()
+
+    for i, txn in enumerate(transactions):
+        # Generate hash
+        txn_hash = generate_transaction_hash(txn)
+        txn['txn_hash'] = txn_hash
+
+        # Check within current batch
+        if txn_hash in seen_in_batch:
+            txn['is_duplicate'] = True
+            txn['duplicate_source'] = 'current_batch'
+            duplicates_found.append(i)
+        else:
+            seen_in_batch.add(txn_hash)
+
+            # Check in MongoDB
+            if db is not None:
+                try:
+                    existing = db.transactions.find_one({'txn_hash': txn_hash})
+                    if existing:
+                        txn['is_duplicate'] = True
+                        txn['duplicate_source'] = 'database'
+                        txn['duplicate_batch_id'] = existing.get('batch_id')
+                        duplicates_found.append(i)
+                    else:
+                        txn['is_duplicate'] = False
+                except Exception as e:
+                    print(f"Error checking duplicates: {e}")
+                    txn['is_duplicate'] = False
+            else:
+                txn['is_duplicate'] = False
+
+    return duplicates_found
 
 @app.route('/')
 def index():
@@ -524,24 +681,72 @@ def upload():
     
     try:
         filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-        
+
+        # Process file in-memory using a temporary file
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp_file:
+            file.save(tmp_file.name)
+            tmp_filepath = tmp_file.name
+
         parser = UniversalParser()
-        transactions = parser.parse(filepath)
+        transactions = parser.parse(tmp_filepath)
+
+        # Clean up temporary file
+        try:
+            os.unlink(tmp_filepath)
+        except:
+            pass
         
         if not transactions:
             flash('No transactions found', 'error')
             return redirect(url_for('index'))
-        
+
+        # Check for duplicates
+        duplicates_found = check_for_duplicates(transactions)
+
+        # Validate transactions
+        validation_warnings = []
+        for i, txn in enumerate(transactions):
+            # Check for zero amounts
+            if abs(txn.get('amount', 0)) < 0.01:
+                txn['needs_review'] = True
+                txn['review_reason'] = 'Zero or near-zero amount'
+                validation_warnings.append(f"Line {i+1}: Zero amount transaction")
+
+            # Check for future dates
+            try:
+                txn_date = datetime.strptime(str(txn.get('date')), '%Y-%m-%d') if isinstance(txn.get('date'), str) else txn.get('date')
+                if txn_date and txn_date > datetime.now():
+                    txn['needs_review'] = True
+                    txn['review_reason'] = txn.get('review_reason', '') + ' | Future-dated'
+                    validation_warnings.append(f"Line {i+1}: Future-dated transaction")
+            except:
+                pass
+
         classifier = ClassificationEngine()
         classified = classifier.classify_batch(transactions)
-        
-        session_data['transactions'] = transactions
-        session_data['classified'] = classified
-        session_data['audit_trail'] = []
-        
-        flash(f'Parsed {len(transactions)} transactions', 'success')
+
+        # FIXED: Use per-user session instead of global variable
+        session_data = {
+            'transactions': transactions,
+            'classified': classified,
+            'audit_trail': [],
+            'output_files': [],
+            'uploaded_at': datetime.now().isoformat(),
+            'filename': filename
+        }
+        save_user_session_data(session_data)
+
+        # Build flash message with warnings
+        messages = [f'Parsed {len(transactions)} transactions']
+        if duplicates_found:
+            messages.append(f'⚠️  {len(duplicates_found)} potential duplicates found (flagged for review)')
+        if validation_warnings:
+            messages.append(f'⚠️  {len(validation_warnings)} transactions need review')
+
+        for msg in messages:
+            flash(msg, 'warning' if '⚠️' in msg else 'success')
+
         return redirect(url_for('review'))
     except Exception as e:
         flash(f'Error: {str(e)}', 'error')
@@ -549,6 +754,7 @@ def upload():
 
 @app.route('/review')
 def review():
+    session_data = get_user_session_data()
     classified = session_data.get('classified', [])
     if not classified:
         flash('No transactions. Upload a file first.', 'warning')
@@ -571,6 +777,7 @@ def review():
 @app.route('/update_transaction', methods=['POST'])
 def update_transaction():
     try:
+        session_data = get_user_session_data()
         data = request.get_json()
         idx = data.get('index')
         if idx is None or idx >= len(session_data['classified']):
@@ -585,13 +792,18 @@ def update_transaction():
                 txn[field] = data[field]
         
         if changes:
+            if 'audit_trail' not in session_data:
+                session_data['audit_trail'] = []
             session_data['audit_trail'].append({
                 'timestamp': datetime.now().strftime('%H:%M:%S'),
                 'transaction': txn.get('description', '')[:25],
                 'changes': changes
             })
             txn['confidence_level'] = 'manual'
-        
+
+        # Save updated session data
+        save_user_session_data(session_data)
+
         return jsonify({'status': 'success'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
@@ -599,30 +811,39 @@ def update_transaction():
 @app.route('/bulk_update', methods=['POST'])
 def bulk_update():
     try:
+        session_data = get_user_session_data()
         data = request.get_json()
         indices = data.get('indices', [])
         updates = data.get('updates', {})
-        
+
         for idx in indices:
             if idx < len(session_data['classified']):
                 txn = session_data['classified'][idx]
                 for k, v in updates.items():
                     if v: txn[k] = v
                 txn['confidence_level'] = 'manual'
-        
+
+        if 'audit_trail' not in session_data:
+            session_data['audit_trail'] = []
         session_data['audit_trail'].append({
             'timestamp': datetime.now().strftime('%H:%M:%S'),
             'transaction': f'Bulk ({len(indices)} items)',
             'changes': [f"{k}={v}" for k,v in updates.items() if v]
         })
+
+        # Save updated session data
+        save_user_session_data(session_data)
+
         return jsonify({'status': 'success'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
 @app.route('/undo_last', methods=['POST'])
 def undo_last():
-    if session_data['audit_trail']:
+    session_data = get_user_session_data()
+    if session_data.get('audit_trail'):
         entry = session_data['audit_trail'].pop()
+        save_user_session_data(session_data)
         return jsonify({'status': 'success', 'message': f"Undone: {entry['transaction']}"})
     return jsonify({'status': 'error', 'message': 'Nothing to undo'})
 
@@ -640,11 +861,15 @@ def add_vendor():
         all_vendors = get_all_vendors()
         if any(v['name'].lower() == name.lower() for v in all_vendors):
             return jsonify({'status': 'error', 'message': 'Vendor already exists'})
-        
-        custom = load_custom_data()
-        custom['vendors'].append({'name': name, 'gl_code': gl_code, 'fund': fund, 'type': 'Vendor'})
-        save_custom_data(custom)
-        
+
+        # Save to MongoDB if available
+        db = get_db()
+        if db is not None:
+            try:
+                db.vendors.insert_one({'name': name, 'gl_code': gl_code, 'fund': fund, 'type': 'Vendor', 'created_at': datetime.now()})
+            except Exception as e:
+                print(f"Error saving vendor to MongoDB: {e}")
+
         return jsonify({'status': 'success', 'message': f'Vendor "{name}" added'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
@@ -663,11 +888,15 @@ def add_customer():
         all_customers = get_all_customers()
         if any(c['name'].lower() == name.lower() for c in all_customers):
             return jsonify({'status': 'error', 'message': 'Customer already exists'})
-        
-        custom = load_custom_data()
-        custom['customers'].append({'name': name, 'gl_code': gl_code, 'fund': fund, 'type': 'Customer'})
-        save_custom_data(custom)
-        
+
+        # Save to MongoDB if available
+        db = get_db()
+        if db is not None:
+            try:
+                db.customers.insert_one({'name': name, 'gl_code': gl_code, 'fund': fund, 'type': 'Customer', 'created_at': datetime.now()})
+            except Exception as e:
+                print(f"Error saving customer to MongoDB: {e}")
+
         return jsonify({'status': 'success', 'message': f'Customer "{name}" added'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
@@ -675,6 +904,7 @@ def add_customer():
 @app.route('/process', methods=['POST'])
 def process():
     try:
+        session_data = get_user_session_data()
         classified = session_data.get('classified', [])
         if not classified:
             flash('No transactions', 'error')
@@ -901,6 +1131,7 @@ def process():
         # Store batch_id in session for results page
         session_data['output_files'] = files_list
         session_data['current_batch_id'] = batch_id
+        save_user_session_data(session_data)
         
         if db is not None:
             flash(f'Files generated and stored in database! Batch ID: {batch_id}', 'success')
@@ -1544,12 +1775,7 @@ def api_create_vendor():
         data['type'] = 'Vendor'
         data['created_at'] = datetime.now()
         db.vendors.insert_one(data)
-        
-        # Also save to local file for backwards compatibility
-        custom = load_custom_data()
-        custom['vendors'].append({'name': data['name'], 'gl_code': data.get('gl_code', ''), 'fund': data.get('fund', ''), 'type': 'Vendor'})
-        save_custom_data(custom)
-        
+
         return jsonify({'status': 'success', 'message': 'Vendor created'}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1627,12 +1853,7 @@ def api_create_customer():
         data['type'] = 'Customer'
         data['created_at'] = datetime.now()
         db.customers.insert_one(data)
-        
-        # Also save to local file for backwards compatibility
-        custom = load_custom_data()
-        custom['customers'].append({'name': data['name'], 'gl_code': data.get('gl_code', ''), 'fund': data.get('fund', ''), 'type': 'Customer'})
-        save_custom_data(custom)
-        
+
         return jsonify({'status': 'success', 'message': 'Customer created'}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -2321,19 +2542,18 @@ RESULTS_TEMPLATE = '''<!DOCTYPE html>
 </body></html>'''
 
 if __name__ == '__main__':
-    print("="*60)
-    print("  Bank Transaction Posting Tool - Enhanced with MongoDB")
-    print("="*60)
-    print(f"  Web Interface: http://127.0.0.1:8587")
-    print(f"  API Endpoint:  http://127.0.0.1:8587/api/")
-    print("-"*60)
-    if mongodb_ready:
-        print(f"  ✓ MongoDB Connected: {MONGODB_URI}{MONGODB_DATABASE}")
-    else:
-        print(f"  ✗ MongoDB Not Available (using local storage)")
-        print(f"    To enable: pip install pymongo")
-        print(f"    Make sure MongoDB is running at {MONGODB_URI}")
-    print("-"*60)
+    from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
+
+    print("="*70)
+    print("  Bank Transaction Posting Tool - MongoDB Enhanced")
+    print("="*70)
+    print(f"  Web Interface: http://{FLASK_HOST}:{FLASK_PORT}")
+    print(f"  API Endpoint:  http://{FLASK_HOST}:{FLASK_PORT}/api/")
+    print("-"*70)
+    print(f"  MongoDB URI: {MONGODB_URI}")
+    print(f"  Database: {MONGODB_DATABASE}")
+    print(f"  Connection: Will initialize on first use (non-blocking)")
+    print("-"*70)
     print("  API Endpoints:")
     print("    GET  /api/status          - Health check")
     print("    GET  /api/stats           - Dashboard statistics")
@@ -2359,5 +2579,6 @@ if __name__ == '__main__':
     print("    ---  UTILITIES  ---")
     print("    GET  /api/audit-logs      - View audit logs")
     print("    POST /api/sync/master-data - Sync to MongoDB")
-    print("="*60)
-    app.run(debug=True, host='0.0.0.0', port=8587)
+    print("="*70)
+    print("\n🚀 Starting server...")
+    app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT)

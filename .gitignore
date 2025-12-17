@@ -2,15 +2,21 @@
 __pycache__/
 *.py[cod]
 *.pyo
-.env
 venv/
+env/
 
-# Uploads and outputs (user data)
-uploads/
-outputs/
+# Environment variables
+.env
+.env.local
 
-# Custom data
-custom_master_data.json
+# User Data (REMOVED - now using MongoDB only)
+# uploads/ - removed, files processed in-memory with tempfile
+# outputs/ - removed, stored in MongoDB
+# custom_master_data.json - removed, using MongoDB
+
+# Logs
+logs/
+*.log
 
 # IDE
 .vscode/

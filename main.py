@@ -211,9 +211,10 @@ Examples:
     
     if args.web:
         print("Starting web interface...")
-        print("Open http://127.0.0.1:8587 in your browser")
+        from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
+        print(f"Open http://{FLASK_HOST}:{FLASK_PORT} in your browser")
         from app import app
-        app.run(debug=True)
+        app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT)
         return
     
     if not args.file:

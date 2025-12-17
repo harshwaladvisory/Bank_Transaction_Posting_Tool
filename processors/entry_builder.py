@@ -31,28 +31,67 @@ class EntryBuilder:
             'JV': []
         }
         
+    def validate_entry_balance(self, entry: Dict) -> Dict:
+        """
+        Validate that entry is balanced (debits = credits)
+
+        Args:
+            entry: Journal entry to validate
+
+        Returns:
+            Validation result dict with 'is_balanced', 'total_debits', 'total_credits', 'variance'
+        """
+        lines = entry.get('lines', [])
+        total_debits = sum(line.get('debit', 0) for line in lines)
+        total_credits = sum(line.get('credit', 0) for line in lines)
+        variance = abs(total_debits - total_credits)
+
+        # Allow 1 cent rounding difference
+        is_balanced = variance < 0.01
+
+        result = {
+            'is_balanced': is_balanced,
+            'total_debits': round(total_debits, 2),
+            'total_credits': round(total_credits, 2),
+            'variance': round(variance, 2)
+        }
+
+        if not is_balanced:
+            entry['needs_review'] = True
+            entry['review_reason'] = entry.get('review_reason', '') + f' | UNBALANCED: DR={total_debits:.2f} CR={total_credits:.2f}'
+            entry['validation_error'] = f'Entry does not balance. Debits: ${total_debits:.2f}, Credits: ${total_credits:.2f}, Variance: ${variance:.2f}'
+
+        entry['balance_check'] = result
+        return result
+
     def build_entry(self, routed_transaction: Dict) -> Dict:
         """
         Build a formatted entry from a routed transaction
-        
+
         Args:
             routed_transaction: Output from ModuleRouter.route()
-            
+
         Returns:
-            Formatted entry dictionary
+            Formatted entry dictionary with balance validation
         """
         module = routed_transaction.get('routed_to')
-        
+
         if module == 'UNIDENTIFIED':
-            return self._build_unidentified_entry(routed_transaction)
+            entry = self._build_unidentified_entry(routed_transaction)
         elif module == 'CR':
-            return self._build_cash_receipt_entry(routed_transaction)
+            entry = self._build_cash_receipt_entry(routed_transaction)
         elif module == 'CD':
-            return self._build_cash_disbursement_entry(routed_transaction)
+            entry = self._build_cash_disbursement_entry(routed_transaction)
         elif module == 'JV':
-            return self._build_journal_voucher_entry(routed_transaction)
-        
-        return routed_transaction
+            entry = self._build_journal_voucher_entry(routed_transaction)
+        else:
+            entry = routed_transaction
+
+        # Validate balance for all entries with lines
+        if 'lines' in entry and len(entry['lines']) > 0:
+            self.validate_entry_balance(entry)
+
+        return entry
     
     def _build_cash_receipt_entry(self, txn: Dict) -> Dict:
         """Build Cash Receipt entry as per SOP"""

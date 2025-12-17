@@ -67,9 +67,9 @@ TESSERACT_CMD = r'C:\Users\sanjana.thakur\AppData\Local\Programs\Tesseract-OCR\t
 POPPLER_PATH = r'C:\Users\sanjana.thakur\poppler\Library\bin'  # Windows default
 
 # Flask settings
-FLASK_HOST = '127.0.0.1'
-FLASK_PORT = 5000
-FLASK_DEBUG = True
+FLASK_HOST = '0.0.0.0'  # Listen on all interfaces for deployment
+FLASK_PORT = int(os.environ.get('PORT', 8587))  # Default to 8587, configurable via environment
+FLASK_DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
 
 # Logging settings
 LOG_FILE = os.path.join(LOG_DIR, 'audit_trail.json')
