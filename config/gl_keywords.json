@@ -1,0 +1,84 @@
+{
+  "deposits": {
+    "HUD TREAS": {"gl": "3001", "name": "Revenue - Federal"},
+    "HUD": {"gl": "3001", "name": "Revenue - Federal"},
+    "NAHASDA": {"gl": "3001", "name": "Revenue - Federal"},
+    "TREASURY": {"gl": "3001", "name": "Revenue - Federal"},
+    "FEDERAL": {"gl": "3001", "name": "Revenue - Federal"},
+    "GRANT": {"gl": "3001", "name": "Revenue - Federal"},
+
+    "BLUE CROSS": {"gl": "4080", "name": "Revenue - Contributions"},
+    "BCBS": {"gl": "4080", "name": "Revenue - Contributions"},
+    "HEALTH INSURANCE": {"gl": "4080", "name": "Revenue - Contributions"},
+    "HEALTHCARE": {"gl": "4080", "name": "Revenue - Contributions"},
+
+    "NC DEPT": {"gl": "3002", "name": "Revenue - State"},
+    "NC DEPARTMENT": {"gl": "3002", "name": "Revenue - State"},
+    "STATE OF": {"gl": "3002", "name": "Revenue - State"},
+    "COUNTY": {"gl": "3003", "name": "Revenue - County"},
+
+    "MERCHANT DEPOSIT": {"gl": "4380", "name": "Revenue - Tomahawk"},
+    "WIXCOM": {"gl": "4380", "name": "Revenue - Tomahawk"},
+    "SQUARE": {"gl": "4380", "name": "Revenue - Tomahawk"},
+    "CLOVER DEPOSIT": {"gl": "4380", "name": "Revenue - Tomahawk"},
+
+    "INTEREST": {"gl": "4100", "name": "Interest Income"},
+    "CAPITALIZATION": {"gl": "4100", "name": "Interest Income"},
+
+    "DEPOSIT": {"gl": "4100", "name": "Revenue - Fundraising"},
+    "TRANSFER IN": {"gl": "4200", "name": "Transfer In"},
+    "WIRE IN": {"gl": "4200", "name": "Transfer In"},
+    "ACH CREDIT": {"gl": "4100", "name": "Revenue - Fundraising"}
+  },
+  "withdrawals": {
+    "PAYROLL": {"gl": "6601", "name": "Salaries"},
+    "INTUIT": {"gl": "6601", "name": "Salaries"},
+    "ADP": {"gl": "6601", "name": "Salaries"},
+    "PAYCHEX": {"gl": "6601", "name": "Salaries"},
+    "DIRECT DEP": {"gl": "6601", "name": "Salaries"},
+
+    "IRS": {"gl": "7400", "name": "Taxes"},
+    "TAX PYMT": {"gl": "7400", "name": "Taxes"},
+    "EFTPS": {"gl": "7400", "name": "Taxes"},
+    "TAX PAYMENT": {"gl": "7400", "name": "Taxes"},
+    "PAYROLL TAX": {"gl": "7400", "name": "Taxes"},
+
+    "QBOOKS": {"gl": "5152", "name": "Software"},
+    "QUICKBOOKS": {"gl": "5152", "name": "Software"},
+    "MICROSOFT": {"gl": "5152", "name": "Software"},
+    "ADOBE": {"gl": "5152", "name": "Software"},
+    "SOFTWARE": {"gl": "5152", "name": "Software"},
+
+    "SERVICE CHARGE": {"gl": "5060", "name": "Bank Charges"},
+    "SERVICE FEE": {"gl": "5060", "name": "Bank Charges"},
+    "BANK FEE": {"gl": "5060", "name": "Bank Charges"},
+    "FDMS": {"gl": "5060", "name": "Bank Charges"},
+    "MERCHANT FEE": {"gl": "5060", "name": "Bank Charges"},
+    "MERCHANT DISCOUNT": {"gl": "5060", "name": "Bank Charges"},
+    "ANALYSIS FEE": {"gl": "5060", "name": "Bank Charges"},
+
+    "BILL.COM": {"gl": "5110", "name": "Contracted Services"},
+    "CONSULTING": {"gl": "5110", "name": "Contracted Services"},
+
+    "ELECTRIC": {"gl": "5200", "name": "Utilities"},
+    "WATER": {"gl": "5200", "name": "Utilities"},
+    "GAS": {"gl": "5200", "name": "Utilities"},
+    "UTILITY": {"gl": "5200", "name": "Utilities"},
+    "PHONE": {"gl": "5200", "name": "Utilities"},
+    "INTERNET": {"gl": "5200", "name": "Utilities"},
+
+    "INSURANCE": {"gl": "5300", "name": "Insurance"},
+
+    "CHECK": {"gl": "7300", "name": "Accounts Payable"},
+    "TRANSFER OUT": {"gl": "7200", "name": "Transfer Out"},
+    "WIRE OUT": {"gl": "7200", "name": "Transfer Out"},
+    "WITHDRAWAL": {"gl": "7300", "name": "Accounts Payable"},
+    "ACH DEBIT": {"gl": "7300", "name": "Accounts Payable"},
+    "PAYMENT": {"gl": "7300", "name": "Accounts Payable"}
+  },
+  "_metadata": {
+    "version": "1.0",
+    "description": "Keyword-based GL code fallback rules for transaction classification",
+    "note": "These rules are used when ChromaDB has no high-confidence learned pattern"
+  }
+}

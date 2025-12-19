@@ -15,6 +15,7 @@ from datetime import datetime
 from functools import wraps
 from bson import ObjectId
 from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, send_file, Response
+from flask import session  # Explicit session import
 from werkzeug.utils import secure_filename
 
 # MongoDB imports
@@ -41,7 +42,7 @@ app.secret_key = os.environ.get('SECRET_KEY', secrets_module.token_hex(32))
 
 # Warn if using default secret key
 if 'SECRET_KEY' not in os.environ:
-    print("⚠️  WARNING: SECRET_KEY environment variable not set!")
+    print("[WARNING] SECRET_KEY environment variable not set!")
     print("   Using auto-generated key. Sessions will not persist across restarts.")
     print("   For production, set: export SECRET_KEY='your-secret-key-here'")
 
@@ -107,15 +108,15 @@ def get_db():
         # Test connection with quick timeout
         _mongo_client.admin.command('ping')
         _mongo_db = _mongo_client[MONGODB_DATABASE]
-        print(f"✓ MongoDB connected: {MONGODB_URI}{MONGODB_DATABASE}")
+        print(f"[OK] MongoDB connected: {MONGODB_URI}{MONGODB_DATABASE}")
         return _mongo_db
     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-        print(f"✗ MongoDB connection failed: {e}")
-        print(f"  → Application will run with static data only")
+        print(f"[ERROR] MongoDB connection failed: {e}")
+        print(f"  -> Application will run with static data only")
         _mongo_connection_failed = True
         return None
     except Exception as e:
-        print(f"✗ MongoDB error: {e}")
+        print(f"[ERROR] MongoDB error: {e}")
         _mongo_connection_failed = True
         return None
 
@@ -123,7 +124,7 @@ def init_mongodb():
     """Initialize MongoDB collections and indexes (lazy, non-blocking)"""
     db = get_db()
     if db is None:
-        print("  → Application running without MongoDB (using static data)")
+        print("  -> Application running without MongoDB (using static data)")
         return False
 
     try:
@@ -148,10 +149,10 @@ def init_mongodb():
         db.output_files.create_index([('created_at', -1)], background=True)
         db.output_files.create_index([('batch_id', 1)], background=True)
 
-        print(f"  → MongoDB collections and indexes initialized")
+        print(f"  -> MongoDB collections and indexes initialized")
         return True
     except Exception as e:
-        print(f"  → MongoDB initialization warning: {e}")
+        print(f"  -> MongoDB initialization warning: {e}")
         # Don't return False - connection works, just initialization had issues
         return True
 
@@ -688,17 +689,36 @@ def upload():
             file.save(tmp_file.name)
             tmp_filepath = tmp_file.name
 
-        parser = UniversalParser()
-        transactions = parser.parse(tmp_filepath)
+        import sys
+        # Use regex parser - faster and more reliable than local LLM
+        parser = UniversalParser(use_llm=False)
+        print(f"[DEBUG] Parsing file: {tmp_filepath}", flush=True)
+        print(f"[DEBUG] File exists: {os.path.exists(tmp_filepath)}", flush=True)
+        print(f"[DEBUG] File size: {os.path.getsize(tmp_filepath)} bytes", flush=True)
+        print(f"[DEBUG] Using fast regex parser", flush=True)
+        sys.stdout.flush()
+
+        try:
+            transactions = parser.parse(tmp_filepath)
+            print(f"[DEBUG] Found {len(transactions)} transactions", flush=True)
+            # Capture parsing metadata for validation warnings
+            parsing_metadata = parser.get_parsing_metadata()
+            print(f"[DEBUG] Parsing metadata: {parsing_metadata}", flush=True)
+        except Exception as parse_error:
+            import traceback
+            print(f"[ERROR] Parse failed: {parse_error}", flush=True)
+            traceback.print_exc()
+            transactions = []
+            parsing_metadata = {}
 
         # Clean up temporary file
         try:
             os.unlink(tmp_filepath)
         except:
             pass
-        
+
         if not transactions:
-            flash('No transactions found', 'error')
+            flash('No transactions found. Check console for debug output.', 'error')
             return redirect(url_for('index'))
 
         # Check for duplicates
@@ -733,22 +753,26 @@ def upload():
             'audit_trail': [],
             'output_files': [],
             'uploaded_at': datetime.now().isoformat(),
-            'filename': filename
+            'filename': filename,
+            'parsing_metadata': parsing_metadata  # Store for validation warnings
         }
         save_user_session_data(session_data)
 
         # Build flash message with warnings
         messages = [f'Parsed {len(transactions)} transactions']
         if duplicates_found:
-            messages.append(f'⚠️  {len(duplicates_found)} potential duplicates found (flagged for review)')
+            messages.append(f'[!] {len(duplicates_found)} potential duplicates found (flagged for review)')
         if validation_warnings:
-            messages.append(f'⚠️  {len(validation_warnings)} transactions need review')
+            messages.append(f'[!] {len(validation_warnings)} transactions need review')
 
         for msg in messages:
-            flash(msg, 'warning' if '⚠️' in msg else 'success')
+            flash(msg, 'warning' if '[!]' in msg else 'success')
 
         return redirect(url_for('review'))
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"UPLOAD ERROR: {error_trace}")  # Print to console for debugging
         flash(f'Error: {str(e)}', 'error')
         return redirect(url_for('index'))
 
@@ -767,12 +791,16 @@ def review():
     total_in = sum(t.get('amount', 0) for t in classified if t.get('amount', 0) > 0)
     total_out = sum(abs(t.get('amount', 0)) for t in classified if t.get('amount', 0) < 0)
     
+    # Get parsing metadata for validation warnings display
+    parsing_metadata = session_data.get('parsing_metadata', {})
+
     return render_template_string(REVIEW_TEMPLATE,
         transactions=classified, by_module=by_module,
         summary={'total_credits': total_in, 'total_debits': total_out, 'balance': total_in - total_out},
-        gl_codes=GL_CODES, fund_codes=FUND_CODES, 
+        gl_codes=GL_CODES, fund_codes=FUND_CODES,
         vendors=get_all_vendors(), customers=get_all_customers(),
-        audit_trail=session_data.get('audit_trail', []))
+        audit_trail=session_data.get('audit_trail', []),
+        parsing_metadata=parsing_metadata)
 
 @app.route('/update_transaction', methods=['POST'])
 def update_transaction():
@@ -782,15 +810,15 @@ def update_transaction():
         idx = data.get('index')
         if idx is None or idx >= len(session_data['classified']):
             return jsonify({'status': 'error', 'message': 'Invalid index'})
-        
+
         txn = session_data['classified'][idx]
         changes = []
-        
+
         for field in ['module', 'gl_code', 'fund_code', 'payee']:
             if data.get(field) and data[field] != txn.get(field):
-                changes.append(f"{field}: {txn.get(field)} → {data[field]}")
+                changes.append(f"{field}: {txn.get(field)} -> {data[field]}")
                 txn[field] = data[field]
-        
+
         if changes:
             if 'audit_trail' not in session_data:
                 session_data['audit_trail'] = []
@@ -805,6 +833,87 @@ def update_transaction():
         save_user_session_data(session_data)
 
         return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/add_transaction', methods=['POST'])
+def add_transaction():
+    """Add a new manual transaction"""
+    try:
+        session_data = get_user_session_data()
+        data = request.get_json()
+
+        # Validate required fields
+        date = data.get('date')
+        amount = data.get('amount')
+        description = data.get('description', '').strip()
+
+        if not date or amount is None or not description:
+            return jsonify({'status': 'error', 'message': 'Date, amount, and description are required'})
+
+        # Create new transaction
+        new_txn = {
+            'date': date,
+            'amount': float(amount),
+            'description': description,
+            'module': data.get('module', 'CR' if float(amount) > 0 else 'CD'),
+            'gl_code': data.get('gl_code', ''),
+            'fund_code': data.get('fund_code', ''),
+            'confidence_level': 'manual',
+            'confidence_score': 100,
+            'is_deposit': float(amount) > 0,
+            'manually_added': True
+        }
+
+        # Add to classified transactions
+        if 'classified' not in session_data:
+            session_data['classified'] = []
+        session_data['classified'].append(new_txn)
+
+        # Add audit trail entry
+        if 'audit_trail' not in session_data:
+            session_data['audit_trail'] = []
+        session_data['audit_trail'].append({
+            'timestamp': datetime.now().strftime('%H:%M:%S'),
+            'transaction': f'ADDED: {description[:25]}',
+            'changes': [f'amount: ${abs(float(amount)):,.2f}', f'module: {new_txn["module"]}']
+        })
+
+        save_user_session_data(session_data)
+        return jsonify({'status': 'success', 'message': f'Transaction "{description[:30]}" added'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/delete_transaction', methods=['POST'])
+def delete_transaction():
+    """Delete a transaction by index"""
+    try:
+        session_data = get_user_session_data()
+        data = request.get_json()
+        idx = data.get('index')
+
+        if idx is None or idx >= len(session_data.get('classified', [])):
+            return jsonify({'status': 'error', 'message': 'Invalid index'})
+
+        # Get transaction info before deleting
+        txn = session_data['classified'][idx]
+        desc = txn.get('description', 'Unknown')[:25]
+        amount = txn.get('amount', 0)
+
+        # Remove transaction
+        session_data['classified'].pop(idx)
+
+        # Add audit trail entry
+        if 'audit_trail' not in session_data:
+            session_data['audit_trail'] = []
+        session_data['audit_trail'].append({
+            'timestamp': datetime.now().strftime('%H:%M:%S'),
+            'transaction': f'DELETED: {desc}',
+            'changes': [f'amount: ${abs(amount):,.2f}']
+        })
+
+        save_user_session_data(session_data)
+        return jsonify({'status': 'success', 'message': f'Transaction deleted'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
@@ -1145,6 +1254,7 @@ def process():
 
 @app.route('/results')
 def results():
+    session_data = get_user_session_data()
     return render_template_string(RESULTS_TEMPLATE,
         output_files=session_data.get('output_files', []),
         audit_trail=session_data.get('audit_trail', []))
@@ -1176,8 +1286,9 @@ def download(filename):
 def download_all_zip():
     """Download all output files as a single ZIP file"""
     import zipfile
-    
+
     db = get_db()
+    session_data = get_user_session_data()
     output_files = session_data.get('output_files', [])
     
     if not output_files:
@@ -2030,6 +2141,289 @@ def api_get_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# ============ CHROMADB LEARNING API ============
+
+# Import learning module (with fallback if not available)
+# ChromaDB may be installed in C:\py_libs due to Windows long path issues
+try:
+    # Try standard import first
+    from learning import get_gl_suggester, get_chroma_store
+    LEARNING_AVAILABLE = True
+    print("[INFO] ChromaDB Learning module loaded successfully.")
+except ImportError:
+    # Try with custom library path
+    try:
+        import sys
+        if 'C:\\py_libs' not in sys.path:
+            sys.path.insert(0, 'C:\\py_libs')
+        from learning import get_gl_suggester, get_chroma_store
+        LEARNING_AVAILABLE = True
+        print("[INFO] ChromaDB Learning module loaded from C:\\py_libs.")
+    except ImportError as e:
+        LEARNING_AVAILABLE = False
+        print(f"[INFO] Learning module not available: {e}. ChromaDB learning features disabled.")
+
+@app.route('/api/learning/suggest', methods=['POST'])
+def api_suggest_gl_code():
+    """
+    Get GL code suggestion for a transaction description.
+
+    Request body:
+    {
+        "description": "HUD TREAS NAHASDA",
+        "type": "deposit" or "withdrawal",
+        "bank": "PNC" (optional)
+    }
+
+    Response:
+    {
+        "gl_code": "3001",
+        "gl_name": "Revenue - Federal",
+        "confidence": 92.5,
+        "confidence_level": "high",
+        "source": "learned" | "keyword" | "default",
+        "reason": "Similar to: HUD TREASURY PAYMENT..."
+    }
+    """
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        data = request.get_json() or {}
+        description = data.get('description', '')
+        transaction_type = data.get('type', 'withdrawal')
+        bank = data.get('bank')
+        amount = data.get('amount')
+
+        if not description:
+            return jsonify({'error': 'Description is required'}), 400
+
+        suggester = get_gl_suggester()
+        result = suggester.suggest(
+            description=description,
+            transaction_type=transaction_type,
+            amount=amount,
+            bank=bank
+        )
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/learn', methods=['POST'])
+def api_learn_transaction():
+    """
+    Learn from a user-approved transaction.
+
+    Request body:
+    {
+        "description": "NEW VENDOR PAYMENT",
+        "gl_code": "7300",
+        "type": "withdrawal",
+        "module": "CD",
+        "bank": "PNC",
+        "user_corrected": false
+    }
+    """
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        data = request.get_json() or {}
+
+        required = ['description', 'gl_code', 'type', 'module']
+        for field in required:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+
+        suggester = get_gl_suggester()
+        doc_id = suggester.learn_from_user(
+            description=data['description'],
+            gl_code=data['gl_code'],
+            transaction_type=data['type'],
+            module=data['module'],
+            bank=data.get('bank', 'Unknown'),
+            user_corrected=data.get('user_corrected', False)
+        )
+
+        return jsonify({
+            'success': True,
+            'doc_id': doc_id,
+            'message': f"Learned pattern for GL {data['gl_code']}"
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/learn-batch', methods=['POST'])
+def api_learn_batch():
+    """
+    Learn from multiple approved transactions at once.
+
+    Request body:
+    {
+        "transactions": [
+            {"description": "...", "gl_code": "...", "type": "...", "module": "..."},
+            ...
+        ],
+        "bank": "PNC"
+    }
+    """
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        data = request.get_json() or {}
+        transactions = data.get('transactions', [])
+        bank = data.get('bank', 'Unknown')
+
+        if not transactions:
+            return jsonify({'error': 'No transactions provided'}), 400
+
+        # Add bank to each transaction
+        for txn in transactions:
+            txn['bank'] = bank
+
+        suggester = get_gl_suggester()
+        count = suggester.learn_batch(transactions, bank)
+
+        return jsonify({
+            'success': True,
+            'learned_count': count,
+            'message': f"Learned from {count} transactions"
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/stats', methods=['GET'])
+def api_learning_stats():
+    """Get learning statistics."""
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        suggester = get_gl_suggester()
+        stats = suggester.get_learning_stats()
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/export', methods=['GET'])
+def api_export_patterns():
+    """Export all learned patterns to JSON file."""
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        export_dir = os.path.join(DATA_DIR, 'exports')
+        os.makedirs(export_dir, exist_ok=True)
+
+        filepath = os.path.join(export_dir, 'learned_patterns.json')
+
+        store = get_chroma_store()
+        count = store.export_patterns(filepath)
+
+        return jsonify({
+            'success': True,
+            'count': count,
+            'filepath': filepath
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/import', methods=['POST'])
+def api_import_patterns():
+    """Import patterns from JSON file."""
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+
+        file = request.files['file']
+        if not file.filename.endswith('.json'):
+            return jsonify({'error': 'Only JSON files supported'}), 400
+
+        # Save temporarily
+        temp_path = os.path.join(DATA_DIR, 'temp_import.json')
+        file.save(temp_path)
+
+        store = get_chroma_store()
+        count = store.import_patterns(temp_path)
+
+        # Clean up
+        os.remove(temp_path)
+
+        return jsonify({
+            'success': True,
+            'imported_count': count,
+            'message': f"Imported {count} patterns"
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/keywords', methods=['GET'])
+def api_get_keywords():
+    """Get current keyword rules."""
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        suggester = get_gl_suggester()
+        return jsonify(suggester.keywords)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/learning/keywords', methods=['POST'])
+def api_add_keyword():
+    """
+    Add a new keyword rule.
+
+    Request body:
+    {
+        "keyword": "NEW COMPANY",
+        "gl_code": "7300",
+        "gl_name": "Accounts Payable",
+        "type": "withdrawal"
+    }
+    """
+    if not LEARNING_AVAILABLE:
+        return jsonify({'error': 'Learning module not available'}), 503
+
+    try:
+        data = request.get_json() or {}
+
+        required = ['keyword', 'gl_code', 'gl_name', 'type']
+        for field in required:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+
+        suggester = get_gl_suggester()
+        success = suggester.add_keyword_rule(
+            keyword=data['keyword'],
+            gl_code=data['gl_code'],
+            gl_name=data['gl_name'],
+            transaction_type=data['type']
+        )
+
+        if success:
+            return jsonify({
+                'success': True,
+                'message': f"Added keyword rule: {data['keyword']} -> GL {data['gl_code']}"
+            })
+        else:
+            return jsonify({'error': 'Failed to save keyword'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 # ============ TEMPLATES ============
 
 INDEX_TEMPLATE = '''<!DOCTYPE html>
@@ -2098,6 +2492,64 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="container mt-4">
 {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for cat,msg in messages %}<div class="alert alert-{{ 'danger' if cat=='error' else cat }} alert-dismissible fade show">{{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>{% endfor %}{% endif %}{% endwith %}
 
+<!-- Validation Warnings Section -->
+{% if parsing_metadata and parsing_metadata.warnings %}
+<div class="alert alert-warning alert-dismissible fade show" role="alert">
+<h5 class="alert-heading"><i class="bi bi-exclamation-triangle"></i> Validation Warnings</h5>
+<ul class="mb-0">
+{% for warning in parsing_metadata.warnings %}
+<li><span class="badge bg-{{ 'danger' if warning.severity == 'high' else 'warning' }}">{{ warning.severity|upper }}</span> {{ warning.message }}</li>
+{% endfor %}
+</ul>
+{% if parsing_metadata.ocr_used %}<hr><small class="text-muted"><i class="bi bi-info-circle"></i> OCR was used to extract text from this document. Some values may need verification.</small>{% endif %}
+<button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+<!-- Bank Summary Comparison (if available) -->
+{% if parsing_metadata and parsing_metadata.expected_deposits %}
+<div class="card mb-3 border-info">
+<div class="card-header bg-info text-white"><i class="bi bi-file-earmark-check"></i> Bank Statement Validation</div>
+<div class="card-body">
+<div class="row">
+<div class="col-md-6">
+<table class="table table-sm table-bordered mb-0">
+<thead class="table-light"><tr><th></th><th>Expected (Bank)</th><th>Parsed</th><th>Match</th></tr></thead>
+<tbody>
+<tr><td><strong>Deposits</strong></td>
+<td>${{ '{:,.2f}'.format(parsing_metadata.expected_deposits) }}</td>
+<td>${{ '{:,.2f}'.format(parsing_metadata.parsed_deposits) }}</td>
+<td>{% if (parsing_metadata.parsed_deposits - parsing_metadata.expected_deposits)|abs < 1 %}<span class="badge bg-success">✓</span>{% else %}<span class="badge bg-danger">✗</span>{% endif %}</td>
+</tr>
+{% if parsing_metadata.expected_withdrawals %}
+<tr><td><strong>Withdrawals</strong></td>
+<td>${{ '{:,.2f}'.format(parsing_metadata.expected_withdrawals) }}</td>
+<td>${{ '{:,.2f}'.format(parsing_metadata.parsed_withdrawals) }}</td>
+<td>{% if (parsing_metadata.parsed_withdrawals - parsing_metadata.expected_withdrawals)|abs < 1 %}<span class="badge bg-success">✓</span>{% else %}<span class="badge bg-danger">✗</span>{% endif %}</td>
+</tr>
+{% endif %}
+</tbody>
+</table>
+</div>
+<div class="col-md-6">
+<div class="p-3 bg-light rounded">
+<p class="mb-1"><strong>Bank:</strong> {{ parsing_metadata.bank_name or 'Unknown' }}</p>
+<p class="mb-1"><strong>Statement Period:</strong> {{ parsing_metadata.statement_month or 'N/A' }}/{{ parsing_metadata.statement_year or 'N/A' }}</p>
+<p class="mb-1"><strong>OCR Used:</strong> {% if parsing_metadata.ocr_used %}<span class="badge bg-warning text-dark">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</p>
+{% if parsing_metadata.quality_score is defined %}
+<p class="mb-0"><strong>Quality Score:</strong>
+{% if parsing_metadata.quality_score >= 80 %}<span class="badge bg-success">{{ parsing_metadata.quality_score }}/100</span>
+{% elif parsing_metadata.quality_score >= 60 %}<span class="badge bg-warning text-dark">{{ parsing_metadata.quality_score }}/100</span>
+{% else %}<span class="badge bg-danger">{{ parsing_metadata.quality_score }}/100</span>{% endif %}
+</p>
+{% endif %}
+</div>
+</div>
+</div>
+</div>
+</div>
+{% endif %}
+
 <div class="row mb-4">
 <div class="col-md-3"><div class="card text-center bg-success text-white p-3"><h2>{{ by_module.CR|length }}</h2><div>Cash Receipts</div></div></div>
 <div class="col-md-3"><div class="card text-center bg-danger text-white p-3"><h2>{{ by_module.CD|length }}</h2><div>Cash Disbursements</div></div></div>
@@ -2126,6 +2578,7 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="card"><div class="card-header d-flex justify-content-between align-items-center">
 <h5><i class="bi bi-list-check"></i> Review Transactions</h5>
 <div>{% if audit_trail %}<button class="btn btn-outline-secondary btn-sm me-2" onclick="undoLast()"><i class="bi bi-arrow-counterclockwise"></i> Undo</button>{% endif %}
+<button class="btn btn-outline-primary btn-sm me-2" data-bs-toggle="modal" data-bs-target="#addTransactionModal"><i class="bi bi-plus-circle"></i> Add Transaction</button>
 <button class="btn btn-outline-success btn-sm me-2" data-bs-toggle="modal" data-bs-target="#addCustomerModal"><i class="bi bi-person-plus"></i> Add Customer</button>
 <button class="btn btn-outline-info btn-sm me-2" data-bs-toggle="modal" data-bs-target="#addVendorModal"><i class="bi bi-building-add"></i> Add Vendor</button>
 <form action="/process" method="post" class="d-inline"><button type="submit" class="btn btn-primary"><i class="bi bi-gear"></i> Generate Files</button></form></div>
@@ -2151,7 +2604,8 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <td><span class="badge bg-{{ 'success' if t.module=='CR' else 'danger' if t.module=='CD' else 'warning' if t.module=='JV' else 'secondary' }}">{{ t.module }}</span></td>
 <td>{{ t.gl_code or '-' }}</td>
 <td><span class="badge badge-{{ t.confidence_level }}">{{ t.confidence_level }}</span></td>
-<td><button class="btn btn-sm btn-outline-primary edit-btn" data-idx="{{ loop.index0 }}" data-desc="{{ t.description }}" data-module="{{ t.module }}" data-gl="{{ t.gl_code or '' }}" data-fund="{{ t.fund_code or '' }}" data-amt="{{ t.amount }}"><i class="bi bi-pencil"></i></button></td>
+<td><button class="btn btn-sm btn-outline-primary edit-btn" data-idx="{{ loop.index0 }}" data-desc="{{ t.description }}" data-module="{{ t.module }}" data-gl="{{ t.gl_code or '' }}" data-fund="{{ t.fund_code or '' }}" data-amt="{{ t.amount }}"><i class="bi bi-pencil"></i></button>
+<button class="btn btn-sm btn-outline-danger delete-btn ms-1" data-idx="{{ loop.index0 }}" data-desc="{{ t.description }}" title="Delete"><i class="bi bi-trash"></i></button></td>
 </tr>{% endfor %}</tbody>
 </table></div>
 <div class="tab-pane fade" id="cr">{% if by_module.CR %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>GL</th></tr></thead><tbody>{% for t in by_module.CR %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td class="text-success">${{ '{:,.2f}'.format(t.amount) }}</td><td>{{ t.gl_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No CR transactions</div>{% endif %}</div>
@@ -2238,6 +2692,29 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-info" onclick="addVendor()"><i class="bi bi-plus"></i> Add</button></div>
 </div></div></div>
 
+<!-- Add Transaction Modal -->
+<div class="modal fade" id="addTransactionModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
+<div class="modal-header bg-primary text-white"><h5><i class="bi bi-plus-circle"></i> Add New Transaction</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+<div class="modal-body">
+<div class="row">
+<div class="col-md-6 mb-3"><label class="form-label">Date *</label><input type="date" class="form-control" id="newTxnDate" required></div>
+<div class="col-md-6 mb-3"><label class="form-label">Amount *</label>
+<div class="input-group"><span class="input-group-text">$</span><input type="number" class="form-control" id="newTxnAmount" step="0.01" placeholder="0.00" required>
+<select class="form-select" id="newTxnType" style="max-width:120px"><option value="deposit">Deposit (+)</option><option value="withdrawal">Withdrawal (-)</option></select></div></div>
+</div>
+<div class="mb-3"><label class="form-label">Description *</label><input type="text" class="form-control" id="newTxnDesc" placeholder="e.g., ACH Corporate Deposit" required></div>
+<div class="row">
+<div class="col-md-4 mb-3"><label class="form-label">Module</label>
+<select class="form-select" id="newTxnModule"><option value="CR">Cash Receipt (CR)</option><option value="CD">Cash Disbursement (CD)</option><option value="JV">Journal Voucher (JV)</option></select></div>
+<div class="col-md-4 mb-3"><label class="form-label">GL Code</label>
+<select class="form-select" id="newTxnGL"><option value="">-- Select --</option>{% for g in gl_codes %}<option value="{{ g.code }}">{{ g.code }} - {{ g.name[:25] }}</option>{% endfor %}</select></div>
+<div class="col-md-4 mb-3"><label class="form-label">Fund/Class</label>
+<select class="form-select" id="newTxnFund"><option value="">-- Select --</option>{% for f in fund_codes %}<option value="{{ f.code }}">{{ f.name }}</option>{% endfor %}</select></div>
+</div>
+</div>
+<div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-primary" onclick="addTransaction()"><i class="bi bi-plus"></i> Add Transaction</button></div>
+</div></div></div>
+
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
@@ -2273,10 +2750,10 @@ document.querySelectorAll('.edit-btn').forEach(btn=>{
 
 function updateModExplain(amt,desc){
   const el=document.getElementById('modExplain');
-  if(amt>0) el.textContent='💡 Deposit → typically CR';
-  else if(desc.toLowerCase().includes('check')) el.textContent='💡 Check → typically CD';
-  else if(desc.toLowerCase().includes('fee')) el.textContent='💡 Fee → typically JV';
-  else el.textContent='💡 Withdrawal → typically CD';
+  if(amt>0) el.textContent='Tip: Deposit - typically CR';
+  else if(desc.toLowerCase().includes('check')) el.textContent='Tip: Check - typically CD';
+  else if(desc.toLowerCase().includes('fee')) el.textContent='Tip: Fee - typically JV';
+  else el.textContent='Tip: Withdrawal - typically CD';
 }
 
 function genSuggestion(desc,amt){
@@ -2352,6 +2829,32 @@ function addVendor() {
     body: JSON.stringify({name, gl_code: gl, fund})
   }).then(r=>r.json()).then(d=>{alert(d.message);if(d.status==='success')location.reload();});
 }
+
+function addTransaction() {
+  const date = document.getElementById('newTxnDate').value;
+  const amount = parseFloat(document.getElementById('newTxnAmount').value);
+  const type = document.getElementById('newTxnType').value;
+  const desc = document.getElementById('newTxnDesc').value.trim();
+  const module = document.getElementById('newTxnModule').value;
+  const gl = document.getElementById('newTxnGL').value;
+  const fund = document.getElementById('newTxnFund').value;
+  if (!date || !amount || !desc) { alert('Date, Amount, and Description are required'); return; }
+  const finalAmount = type === 'withdrawal' ? -Math.abs(amount) : Math.abs(amount);
+  fetch('/add_transaction', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({date, amount: finalAmount, description: desc, module, gl_code: gl, fund_code: fund})
+  }).then(r=>r.json()).then(d=>{alert(d.message);if(d.status==='success')location.reload();});
+}
+
+document.querySelectorAll('.delete-btn').forEach(btn=>{
+  btn.onclick=function(){
+    const idx = this.dataset.idx;
+    const desc = this.dataset.desc || 'this transaction';
+    if(!confirm('Are you sure you want to delete "' + desc.substring(0, 50) + '"?')) return;
+    fetch('/delete_transaction', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({index: parseInt(idx)})
+    }).then(r=>r.json()).then(d=>{if(d.status==='success')location.reload();else alert(d.message);});
+  };
+});
 
 function toggleAll(){
   const all=document.getElementById('selAll').checked;
@@ -2580,5 +3083,5 @@ if __name__ == '__main__':
     print("    GET  /api/audit-logs      - View audit logs")
     print("    POST /api/sync/master-data - Sync to MongoDB")
     print("="*70)
-    print("\n🚀 Starting server...")
+    print("\n[*] Starting server...")
     app.run(debug=FLASK_DEBUG, host=FLASK_HOST, port=FLASK_PORT)

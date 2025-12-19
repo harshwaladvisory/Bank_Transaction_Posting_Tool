@@ -1,0 +1,198 @@
+{
+  "version": "2.0",
+  "description": "Bank statement templates - Add new banks here, no code changes needed!",
+  "how_to_add_new_bank": {
+    "steps": [
+      "1. Add a new entry under 'banks' with unique name",
+      "2. Add 'identifiers' - text that uniquely identifies this bank",
+      "3. Add 'transaction_patterns' - regex patterns to extract transactions",
+      "4. Add 'deposit_keywords' and 'withdrawal_keywords' for classification",
+      "5. Test with a sample PDF"
+    ],
+    "example": "See 'CrossFirst' template below"
+  },
+  "banks": {
+    "CrossFirst": {
+      "identifiers": ["CrossFirst", "Cross First", "IntraFi", "ICS", "IntraFi Cash Service"],
+      "requires_ocr": true,
+      "transaction_patterns": [
+        {
+          "name": "withdrawal_in_parens",
+          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+(.+?)\\s*\\(\\s*\\$?([\\d,]+\\.\\d{2})\\s*\\)\\s*\\$?[\\d,]+\\.\\d{2}",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "withdrawal"
+        },
+        {
+          "name": "deposit_no_parens",
+          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})\\s+[\\d,]+\\.\\d{2}\\s*$",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "auto"
+        }
+      ],
+      "date_format": "MM/DD/YYYY",
+      "ocr_fixes": {
+        "date_day_90_offset": true
+      },
+      "deposit_keywords": ["INTEREST", "DEPOSIT", "CREDIT", "CAPITALIZATION"],
+      "withdrawal_keywords": ["WITHDRAWAL", "FEE", "DEBIT"],
+      "skip_patterns": ["Summary of Accounts", "Account ID", "Opening Balance", "Ending Balance", "DETAILED ACCOUNT", "Member FDIC", "IntraFi Cash Service"],
+      "balance_validation": {
+        "opening_pattern": "Opening\\s*Balance[:\\s]*\\$?([\\d,]+\\.\\d{2})",
+        "ending_pattern": "Ending\\s*Balance[:\\s]*\\$?([\\d,]+\\.\\d{2})"
+      }
+    },
+    "PNC": {
+      "identifiers": ["PNC Bank", "PNC", "pnc.com", "Non-Profit Checking"],
+      "requires_ocr": true,
+      "sections": {
+        "deposits": {
+          "start_markers": ["ACH Additions", "Other Additions", "Deposits and Other"],
+          "end_markers": ["ACH Deductions", "Service Charges", "Daily Balance"]
+        },
+        "withdrawals": {
+          "start_markers": ["ACH Deductions", "Other Deductions", "Service Charges", "Checks and Other"],
+          "end_markers": ["Daily Balance", "Detail of Services", "YOUR CARD PROCESSING"]
+        }
+      },
+      "skip_patterns": ["Daily Balance", "YOUR CARD PROCESSING STATEMENT", "Balance Summary"],
+      "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+([\\d,]+\\.\\d{2})\\s+(.+)",
+      "date_format": "MM/DD",
+      "summary_patterns": {
+        "total_deposits": "(?:ACH Additions|Deposits and Other Additions)\\s+\\d+\\s+([\\d,]+\\.\\d{2})",
+        "total_withdrawals": "(?:ACH Deductions|Checks and Other Deductions)\\s+\\d+\\s+([\\d,]+\\.\\d{2})"
+      },
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT", "HUD", "TREAS"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYROLL"]
+    },
+    "Sovereign": {
+      "identifiers": ["Sovereign Bank", "Sovereign", "banksovereign.com", "BUSINESS INTEREST"],
+      "requires_ocr": true,
+      "transaction_patterns": [
+        {
+          "name": "standard",
+          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+((?:CHECK\\s*#?\\s*\\d+|DEPOSIT|INTEREST))\\s+\\$([\\d,\\s]+\\.\\d{2})\\s+\\$",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "auto"
+        }
+      ],
+      "date_format": "MM/DD/YYYY",
+      "summary_patterns": {
+        "total_deposits": "(\\d+)\\s+Credit\\(?s?\\)?\\s+This\\s+Period\\s+\\$?([\\d,]+\\.?\\d*)",
+        "total_withdrawals": "(\\d+)\\s+Debit\\(?s?\\)?\\s+This\\s+Period\\s+\\$?([\\d,]+\\.?\\d*)"
+      },
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL"],
+      "skip_patterns": ["Beginning Balance", "Ending Balance", "Interest Earned From"]
+    },
+    "Truist": {
+      "identifiers": ["TRUIST", "Truist Bank", "truist.com", "SunTrust", "BB&T"],
+      "requires_ocr": true,
+      "sections": {
+        "deposits": {
+          "start_markers": ["Deposits, credits and interest", "Deposits"],
+          "end_markers": ["Your new balance", "Checks", "Other withdrawals"]
+        },
+        "withdrawals": {
+          "start_markers": ["Checks", "Other withdrawals", "Debits"],
+          "end_markers": ["Deposits, credits", "Your new balance"]
+        }
+      },
+      "skip_patterns": ["Daily Balance", "Account Summary"],
+      "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})$",
+      "date_format": "MM/DD",
+      "summary_patterns": {
+        "total_deposits": "Total\\s+deposits[\\s\\S]*?([\\d,]+\\.\\d{2})",
+        "total_withdrawals": "Total\\s+withdrawals[\\s\\S]*?([\\d,]+\\.\\d{2})"
+      },
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT", "ACH CREDIT"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYROLL"]
+    },
+    "Chase": {
+      "identifiers": ["Chase", "JPMorgan Chase", "chase.com"],
+      "requires_ocr": false,
+      "sections": {
+        "deposits": {
+          "start_markers": ["Deposits and Additions", "DEPOSITS"],
+          "end_markers": ["Electronic Withdrawals", "Checks Paid"]
+        },
+        "withdrawals": {
+          "start_markers": ["Electronic Withdrawals", "Checks Paid", "ATM & Debit Card"],
+          "end_markers": ["Daily Ending Balance", "Service Charges"]
+        }
+      },
+      "skip_patterns": ["Daily Ending Balance"],
+      "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})$",
+      "date_format": "MM/DD",
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYMENT"]
+    },
+    "Bank of America": {
+      "identifiers": ["Bank of America", "BofA", "bankofamerica.com"],
+      "requires_ocr": false,
+      "sections": {
+        "deposits": {
+          "start_markers": ["Deposits and other credits", "DEPOSITS"],
+          "end_markers": ["Withdrawals and other debits", "Checks"]
+        },
+        "withdrawals": {
+          "start_markers": ["Withdrawals and other debits", "Checks"],
+          "end_markers": ["Daily ledger balance", "Service charges"]
+        }
+      },
+      "skip_patterns": ["Daily ledger balance"],
+      "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})$",
+      "date_format": "MM/DD",
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE"]
+    },
+    "Wells Fargo": {
+      "identifiers": ["Wells Fargo", "wellsfargo.com"],
+      "requires_ocr": false,
+      "sections": {
+        "deposits": {
+          "start_markers": ["Deposits/Credits", "Deposits"],
+          "end_markers": ["Withdrawals/Debits", "Checks Paid"]
+        },
+        "withdrawals": {
+          "start_markers": ["Withdrawals/Debits", "Checks Paid"],
+          "end_markers": ["Daily Balance Summary", "Ending balance"]
+        }
+      },
+      "skip_patterns": ["Daily Balance Summary"],
+      "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})$",
+      "date_format": "MM/DD",
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE"]
+    }
+  },
+  "default_gl_mappings": {
+    "deposits": {
+      "HUD": {"gl": "3001", "fund": "NAHASDA", "confidence": "high"},
+      "NAHASDA": {"gl": "3001", "fund": "NAHASDA", "confidence": "high"},
+      "Blue Cross": {"gl": "4080", "fund": "BCBS", "confidence": "high"},
+      "BCBS": {"gl": "4080", "fund": "BCBS", "confidence": "high"},
+      "Delta Dental": {"gl": "4080", "fund": "Health", "confidence": "high"},
+      "Merchant Deposit": {"gl": "4380", "fund": "General", "confidence": "medium"},
+      "DEPOSIT": {"gl": "4100", "fund": "General", "confidence": "low"},
+      "INTEREST": {"gl": "9010", "fund": "General", "confidence": "high"},
+      "Transfer": {"gl": "1010", "fund": "General", "confidence": "medium"}
+    },
+    "withdrawals": {
+      "PAYROLL": {"gl": "6600", "fund": "General", "confidence": "high"},
+      "ADP": {"gl": "6600", "fund": "General", "confidence": "high"},
+      "INTUIT": {"gl": "6600", "fund": "General", "confidence": "high"},
+      "IRS": {"gl": "6700", "fund": "General", "confidence": "high"},
+      "EFTPS": {"gl": "6700", "fund": "General", "confidence": "high"},
+      "TAX": {"gl": "6700", "fund": "General", "confidence": "medium"},
+      "FEE": {"gl": "5060", "fund": "General", "confidence": "high"},
+      "SERVICE CHARGE": {"gl": "5060", "fund": "General", "confidence": "high"},
+      "CHECK": {"gl": "2000", "fund": "General", "confidence": "low"},
+      "GFL": {"gl": "5950", "fund": "Indirect", "confidence": "high"},
+      "WASTE": {"gl": "5950", "fund": "Indirect", "confidence": "high"},
+      "PROSHRED": {"gl": "5810", "fund": "Indirect", "confidence": "high"},
+      "QUALITY OFFICE": {"gl": "5380", "fund": "General", "confidence": "high"}
+    }
+  },
+  "max_transaction_amount": 10000000,
+  "default_year": 2025
+}
