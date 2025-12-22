@@ -131,7 +131,7 @@ BANK STATEMENT TEXT:
             response = requests.post(
                 self.local_url,
                 json={
-                    "model": "llama3.2:latest",  # Your installed model
+                    "model": "llama3.2:latest",  # Using 3B model (8B requires more RAM)
                     "prompt": prompt,
                     "stream": False,
                     "options": {

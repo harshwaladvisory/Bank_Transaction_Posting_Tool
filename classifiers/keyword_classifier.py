@@ -114,6 +114,9 @@ class KeywordClassifier:
             "ach debit", "ach payment", "wire out", "wire transfer",
             "transfer out", "outgoing wire", "bill pay", "billpay",
             "autopay", "auto pay", "recurring payment", "scheduled payment",
+
+            # Service Fees (bank fees that reduce cash)
+            "service fee", "service charge",
             
             # Checks
             "check", "cheque", "chk", "check #", "check no", "check number",
@@ -209,8 +212,8 @@ class KeywordClassifier:
     def _get_jv_keywords(self) -> List[str]:
         """Journal Voucher keywords - 100+ terms"""
         return [
-            # Bank Fees & Charges
-            "bank fee", "bank charge", "service charge", "monthly fee",
+            # Bank Fees & Charges (NOTE: service fee/charge moved to CD)
+            "bank fee", "bank charge", "monthly fee",
             "maintenance fee", "account fee", "analysis charge",
             "wire fee", "transfer fee", "ach fee", "transaction fee",
             "overdraft", "overdraft fee", "nsf", "nsf fee",
@@ -278,14 +281,16 @@ class KeywordClassifier:
             r"(?i)ach.*debit",
             r"(?i)wire.*to",
             r"(?i)bill.*pay",
-            r"(?i)payment.*to"
+            r"(?i)payment.*to",
+            r"(?i)service.*fee",
+            r"(?i)service.*charge"
         ]
     
     def _get_jv_patterns(self) -> List[str]:
         """Regex patterns for Journal Vouchers"""
         return [
             r"(?i)bank.*charge",
-            r"(?i)service.*fee",
+            # NOTE: service.*fee moved to CD patterns
             r"(?i)monthly.*maintenance",
             r"(?i)transfer.*between",
             r"(?i)correction.*entry",

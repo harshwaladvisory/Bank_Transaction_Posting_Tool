@@ -17,8 +17,20 @@
       "requires_ocr": true,
       "transaction_patterns": [
         {
-          "name": "withdrawal_in_parens",
-          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+(.+?)\\s*\\(\\s*\\$?([\\d,]+\\.\\d{2})\\s*\\)\\s*\\$?[\\d,]+\\.\\d{2}",
+          "name": "withdrawal_parens_dollar",
+          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+(Withdrawal|WITHDRAWAL)\\s+\\(\\$([\\d,]+\\.\\d{2})\\)\\s+\\$?[\\d,]+",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "withdrawal"
+        },
+        {
+          "name": "withdrawal_parens_nodollar",
+          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+(Withdrawal|WITHDRAWAL)\\s+\\(([\\d,]+\\.\\d{2})\\)\\s+[\\d,]+",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "withdrawal"
+        },
+        {
+          "name": "withdrawal_in_parens_flex",
+          "pattern": "^(\\d{1,2}/\\d{1,2}/\\d{4})\\s+(.+?)\\s*\\(\\s*\\$?([\\d,]+\\.\\d{2})\\s*\\)\\s*\\$?[\\d,]+",
           "groups": {"date": 1, "description": 2, "amount": 3},
           "type": "withdrawal"
         },
@@ -89,23 +101,61 @@
       "requires_ocr": true,
       "sections": {
         "deposits": {
-          "start_markers": ["Deposits, credits and interest", "Deposits"],
-          "end_markers": ["Your new balance", "Checks", "Other withdrawals"]
+          "start_markers": ["DATE DESCRIPTION AMOUNT($)", "Total deposits, credits"],
+          "end_markers": ["Important:", "PAGE", "Questions"]
         },
         "withdrawals": {
-          "start_markers": ["Checks", "Other withdrawals", "Debits"],
-          "end_markers": ["Deposits, credits", "Your new balance"]
+          "start_markers": ["Other withdrawals, debits and service charges", "DATE CHECK #", "DATE DESCRIPTION AMOUNT(S)"],
+          "end_markers": ["Total other withdrawals", "Deposits, credits and interest"]
+        },
+        "checks": {
+          "start_markers": ["DATE CHECK #"],
+          "end_markers": ["Other withdrawals", "Total checks"]
         }
       },
-      "skip_patterns": ["Daily Balance", "Account Summary"],
+      "transaction_patterns": [
+        {
+          "name": "check_multicolumn",
+          "pattern": "^(\\d{1,2}/\\d{1,2})\\s+\\*?(\\d{4,10})\\s+([\\d,]+\\.\\d{2})",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "withdrawal",
+          "prefix": "CHECK #"
+        },
+        {
+          "name": "ach_withdrawal",
+          "pattern": "^(\\d{1,2}/\\d{1,2})\\s+(ACH\\s*CORP\\s*DEBIT.+?)\\s+([\\d,]+\\.\\d{2})\\s*$",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "withdrawal"
+        },
+        {
+          "name": "transfer_withdrawal",
+          "pattern": "^(\\d{1,2}/\\d{1,2})\\s+(TELEPHONE TRANSFER.+?)\\s+([\\d,]+\\.\\d{2})",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "withdrawal"
+        },
+        {
+          "name": "deposit_line",
+          "pattern": "^(\\d{1,2}/\\d{1,2})\\s+(DEPOSIT|Wixcom.+?)\\s+([\\d,]+\\.\\d{2})",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "deposit"
+        },
+        {
+          "name": "standard_with_amount",
+          "pattern": "^(\\d{1,2}/\\d{1,2})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})\\s*$",
+          "groups": {"date": 1, "description": 2, "amount": 3},
+          "type": "auto"
+        }
+      ],
+      "skip_patterns": ["Daily Balance", "Account Summary", "Previous Balance", "New Balance", "Page", "continued", "Your previous balance", "Your new balance", "Deposits, credits and interest ;", "Checks -", "Other withdrawals, debits and service charges -", "Total deposits", "Total checks", "Total other"],
       "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+(.+?)\\s+([\\d,]+\\.\\d{2})$",
       "date_format": "MM/DD",
       "summary_patterns": {
-        "total_deposits": "Total\\s+deposits[\\s\\S]*?([\\d,]+\\.\\d{2})",
-        "total_withdrawals": "Total\\s+withdrawals[\\s\\S]*?([\\d,]+\\.\\d{2})"
+        "total_deposits": "Total deposits[^=]*=\\s*\\$?([\\d,]+\\.\\d{2})",
+        "total_withdrawals": "Total other withdrawals[^=]*=\\s*\\$?([\\d,]+\\.\\d{2})",
+        "total_checks": "Total checks\\s*=\\s*\\$?([\\d,]+\\.\\d{2})"
       },
-      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT", "ACH CREDIT"],
-      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYROLL"]
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT", "ACH CREDIT", "TRANSFER FROM", "MOBILE DEPOSIT", "Wixcom"],
+      "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYROLL", "ACH CORP DEBIT", "INTUIT", "SERVICE CHARGE", "Bill.com", "TAX PYMT", "TELEPHONE TRANSFER"]
     },
     "Chase": {
       "identifiers": ["Chase", "JPMorgan Chase", "chase.com"],
@@ -163,6 +213,52 @@
       "date_format": "MM/DD",
       "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT"],
       "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE"]
+    },
+    "Farmers": {
+      "identifiers": ["FARMERS BANK", "Farmers Bank", "farmersbankok.com", "Carnegie, OK 73015", "NUMBERED CHECKS"],
+      "requires_ocr": true,
+      "custom_parser": "farmers",
+      "sections": {
+        "activity": {
+          "start_markers": ["BUSINESS ACCOUNT", "PREVIOUS BALANCE"],
+          "end_markers": ["NUMBERED CHECKS", "DAILY BALANCE INFORMATION"]
+        },
+        "checks": {
+          "start_markers": ["NUMBERED CHECKS"],
+          "end_markers": ["DAILY BALANCE INFORMATION", "HOW TO RECONCILE"]
+        }
+      },
+      "ignore_sections": [
+        "DAILY BALANCE INFORMATION",
+        "HOW TO RECONCILE YOUR CHECKING ACCOUNT",
+        "CHECKS OUTSTANDING",
+        "IMPORTANT:",
+        "DISCLOSURES"
+      ],
+      "check_image_indicators": [
+        "AUTHORIZED SIGNATURE",
+        "ENDORSE HERE",
+        "FOR MOBILE DEPOSIT"
+      ],
+      "transaction_patterns": [
+        {
+          "name": "activity_line",
+          "pattern": "^(\\d{1,2}/\\d{1,2})\\s+([\\d,]+\\.\\d{2})\\s+(DEPOSIT|SERVICE FEE|INTEREST|CHARGE|CREDIT)",
+          "groups": {"date": 1, "amount": 2, "description": 3},
+          "type": "auto"
+        },
+        {
+          "name": "numbered_check",
+          "pattern": "(\\d{4})\\*?\\s*(\\d{1,2}/\\d{1,2})\\s+([\\d,]+\\.\\d{2})",
+          "groups": {"check_num": 1, "date": 2, "amount": 3},
+          "type": "withdrawal",
+          "prefix": "CHECK #"
+        }
+      ],
+      "date_format": "MM/DD",
+      "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT"],
+      "withdrawal_keywords": ["CHECK", "SERVICE FEE", "FEE", "CHARGE", "DEBIT"],
+      "skip_patterns": ["DAILY BALANCE", "HOW TO RECONCILE", "CHECKS OUTSTANDING", "DISCLOSURES", "Choice of Law", "Balance Date"]
     }
   },
   "default_gl_mappings": {

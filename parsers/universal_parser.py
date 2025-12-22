@@ -1,11 +1,11 @@
 """
 Universal Parser Module - Auto-detect file type and route to appropriate parser
-Now with LLM support for better accuracy!
+Now with SmartParser for template-based parsing with AI fallback!
 """
 
 import os
 from typing import List, Dict
-from .pdf_parser import PDFParser
+from .smart_parser import SmartParser
 from .excel_parser import ExcelParser
 
 # Try to import LLM parser
@@ -31,22 +31,22 @@ class UniversalParser:
         Initialize parser
 
         Args:
-            use_llm: If True and OpenAI is available, use LLM for PDF parsing
+            use_llm: If True and AI is available, use AI fallback for unknown formats
         """
-        self.pdf_parser = PDFParser()
+        self.smart_parser = SmartParser(use_ai_fallback=use_llm)
         self.excel_parser = ExcelParser()
         self.llm_parser = None
         self.last_parser = None
         self.file_type = None
         self.use_llm = use_llm
 
-        # Initialize LLM parser if available and requested
+        # Initialize LLM parser if available and requested (as backup)
         if use_llm and LLM_AVAILABLE:
             self.llm_parser = LLMParser()
             if self.llm_parser.is_available():
-                print("[INFO] LLM parser enabled (GPT-4)")
+                print("[INFO] LLM fallback enabled (GPT-4)")
             else:
-                print("[INFO] LLM parser not available (no API key). Using regex parser.")
+                print("[INFO] LLM fallback not available. Using SmartParser templates only.")
                 self.llm_parser = None
 
     def parse(self, file_path: str) -> List[Dict]:
@@ -70,24 +70,18 @@ class UniversalParser:
         self.file_type = self.SUPPORTED_EXTENSIONS[ext]
 
         if self.file_type == 'pdf':
-            # Try LLM parser first if available
-            if self.llm_parser and self.llm_parser.is_available():
-                print("[INFO] Using LLM parser for PDF...")
+            # Use SmartParser with template-based parsing + AI fallback
+            print("[INFO] Using SmartParser for PDF (template-based + AI fallback)...")
+            self.last_parser = self.smart_parser
+            transactions = self.smart_parser.parse(file_path)
+
+            # If SmartParser fails and LLM is available, try LLM as backup
+            if not transactions and self.llm_parser and self.llm_parser.is_available():
+                print("[WARNING] SmartParser returned no results. Trying LLM parser...")
                 self.last_parser = self.llm_parser
                 transactions = self.llm_parser.parse(file_path)
 
-                # If LLM fails or returns no results, fall back to regex
-                if not transactions:
-                    print("[WARNING] LLM parser returned no results. Falling back to regex parser.")
-                    self.last_parser = self.pdf_parser
-                    transactions = self.pdf_parser.parse(file_path)
-
-                return transactions
-            else:
-                # Use regex parser
-                print("[INFO] Using regex parser for PDF...")
-                self.last_parser = self.pdf_parser
-                return self.pdf_parser.parse(file_path)
+            return transactions
         else:
             self.last_parser = self.excel_parser
             return self.excel_parser.parse(file_path)
@@ -97,17 +91,22 @@ class UniversalParser:
         if self.last_parser:
             summary = self.last_parser.get_summary()
             summary['file_type'] = self.file_type
-            summary['parser_type'] = 'llm' if self.last_parser == self.llm_parser else 'regex'
+            if self.last_parser == self.llm_parser:
+                summary['parser_type'] = 'llm'
+            elif self.last_parser == self.smart_parser:
+                summary['parser_type'] = 'smart'
+            else:
+                summary['parser_type'] = 'regex'
             return summary
         return {'status': 'no_file_parsed'}
 
     def get_metadata(self) -> Dict:
         """Get metadata from last parsed file"""
-        if isinstance(self.last_parser, PDFParser):
+        if isinstance(self.last_parser, SmartParser):
             return {
                 'bank_name': self.last_parser.bank_name,
-                'account_number': self.last_parser.account_number,
-                'statement_period': self.last_parser.statement_period
+                'parsing_method': self.last_parser.parsing_method,
+                'template_used': self.last_parser.bank_name if self.last_parser.parsing_method == 'template' else None
             }
         elif isinstance(self.last_parser, ExcelParser):
             return {
@@ -117,7 +116,7 @@ class UniversalParser:
 
     def get_parsing_metadata(self) -> Dict:
         """Get detailed parsing metadata including validation warnings"""
-        if isinstance(self.last_parser, PDFParser):
+        if isinstance(self.last_parser, SmartParser):
             return self.last_parser.get_parsing_metadata()
         return {}
 

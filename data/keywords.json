@@ -30,9 +30,10 @@
             ]
         },
         "CD": {
-            "description": "Cash Disbursements - Vendor payments, payroll, taxes, expenses",
+            "description": "Cash Disbursements - Vendor payments, payroll, taxes, expenses, service fees",
             "keywords": [
                 "payment", "paid", "check", "cheque", "withdrawal", "debit",
+                "service fee", "service charge",
                 "payroll", "salary", "wage", "compensation", "bonus",
                 "adp", "paychex", "gusto", "intuit payroll", "quickbooks payroll",
                 "irs", "eftps", "federal tax", "state tax", "local tax",
@@ -62,13 +63,15 @@
                 "(?i)tax.*payment",
                 "(?i)vendor.*payment",
                 "(?i)check.*#",
-                "(?i)ach.*debit"
+                "(?i)ach.*debit",
+                "(?i)service.*fee",
+                "(?i)service.*charge"
             ]
         },
         "JV": {
             "description": "Journal Voucher - Bank fees, interest, corrections, transfers",
             "keywords": [
-                "bank fee", "service charge", "monthly fee", "maintenance fee",
+                "bank fee", "monthly fee", "maintenance fee",
                 "wire fee", "transfer fee", "ach fee", "overdraft fee",
                 "nsf fee", "returned item fee", "stop payment fee",
                 "analysis charge", "account analysis", "treasury management",
@@ -87,7 +90,6 @@
             ],
             "patterns": [
                 "(?i)bank.*charge",
-                "(?i)service.*fee",
                 "(?i)monthly.*maintenance",
                 "(?i)transfer.*between",
                 "(?i)correction.*entry"

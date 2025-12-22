@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import OUTPUT_DIR, SUPPORTED_BANK_EXTENSIONS
+from config import SUPPORTED_BANK_EXTENSIONS
 from parsers import UniversalParser, parse_bank_statement
 from classifiers import ClassificationEngine
 from processors import ModuleRouter, EntryBuilder, OutputGenerator
@@ -133,7 +133,7 @@ def process_bank_statement(file_path: str, output_dir: str = None,
         if verbose:
             print(f"\n[5/5] Generating output files...")
         
-        output_generator = OutputGenerator(output_dir=output_dir, target_system=target_system)
+        output_generator = OutputGenerator(target_system=target_system)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
         generated_files = output_generator.generate_all(entries, timestamp)
@@ -151,10 +151,14 @@ def process_bank_statement(file_path: str, output_dir: str = None,
         results['generated_files'] = generated_files
         
         if verbose:
-            print(f"      ✓ Generated files:")
-            for name, path in generated_files.items():
-                print(f"        - {name}: {os.path.basename(path)}")
-        
+            print(f"      ✓ Generated files (in-memory):")
+            for name, file_info in generated_files.items():
+                if isinstance(file_info, tuple):
+                    filename, buffer = file_info
+                    print(f"        - {name}: {filename} ({len(buffer.getvalue())} bytes)")
+                else:
+                    print(f"        - {name}: {file_info}")
+
         # Final summary
         results['summary'] = {
             'total_transactions': len(transactions),
@@ -173,7 +177,7 @@ def process_bank_statement(file_path: str, output_dir: str = None,
             print(f"Needs Review: {results['summary']['needs_review']}")
             print(f"Total Credits: ${results['summary']['total_credits']:,.2f}")
             print(f"Total Debits: ${results['summary']['total_debits']:,.2f}")
-            print(f"\nOutput Directory: {output_dir or OUTPUT_DIR}")
+            print(f"\nOutput: Files generated in-memory (use web interface to download)")
         
     except Exception as e:
         results['status'] = 'error'

@@ -30,7 +30,7 @@ from typing import List, Dict, Optional
 # LLM Server settings
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3.2:latest"  # Your installed model
+OLLAMA_MODEL = "llama3.2:latest"  # Using 3B model (8B requires more RAM)
 
 
 class LLMParser:

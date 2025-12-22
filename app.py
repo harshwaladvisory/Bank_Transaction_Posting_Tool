@@ -14,7 +14,7 @@ import base64
 from datetime import datetime
 from functools import wraps
 from bson import ObjectId
-from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, send_file, Response
+from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, send_file, Response, make_response
 from flask import session  # Explicit session import
 from werkzeug.utils import secure_filename
 
@@ -49,6 +49,16 @@ if 'SECRET_KEY' not in os.environ:
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Disable caching for all responses to ensure fresh data after uploads
+@app.after_request
+def add_no_cache_headers(response):
+    """Add no-cache headers to all responses to prevent stale data"""
+    if 'text/html' in response.content_type or response.content_type == 'application/json':
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    return response
 
 # MongoDB Configuration
 MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
@@ -669,6 +679,24 @@ def check_for_duplicates(transactions):
 def index():
     return render_template_string(INDEX_TEMPLATE)
 
+@app.route('/clear_session')
+def clear_session():
+    """Clear user session data to force fresh upload"""
+    session_id = get_user_session_id()
+    db = get_db()
+
+    if db is not None:
+        try:
+            db.user_sessions.delete_one({'session_id': session_id})
+            print(f"[DEBUG] Cleared MongoDB session: {session_id}")
+        except Exception as e:
+            print(f"Error clearing session: {e}")
+
+    # Clear Flask session too
+    session.clear()
+    flash('Session cleared. Upload a new file.', 'success')
+    return redirect(url_for('index'))
+
 @app.route('/upload', methods=['POST'])
 def upload():
     if 'file' not in request.files:
@@ -690,17 +718,24 @@ def upload():
             tmp_filepath = tmp_file.name
 
         import sys
-        # Use regex parser - faster and more reliable than local LLM
+        # Use SmartParser - template-based with AI fallback
         parser = UniversalParser(use_llm=False)
+        print(f"", flush=True)
+        print(f"=" * 60, flush=True)
+        print(f"[DEBUG] *** USING SMARTPARSER (UPDATED CODE) ***", flush=True)
+        print(f"[DEBUG] Parser type: {type(parser.smart_parser).__name__ if hasattr(parser, 'smart_parser') else 'NO SMART PARSER!'}", flush=True)
+        print(f"=" * 60, flush=True)
         print(f"[DEBUG] Parsing file: {tmp_filepath}", flush=True)
         print(f"[DEBUG] File exists: {os.path.exists(tmp_filepath)}", flush=True)
         print(f"[DEBUG] File size: {os.path.getsize(tmp_filepath)} bytes", flush=True)
-        print(f"[DEBUG] Using fast regex parser", flush=True)
         sys.stdout.flush()
 
         try:
             transactions = parser.parse(tmp_filepath)
             print(f"[DEBUG] Found {len(transactions)} transactions", flush=True)
+            # DEBUG: Show each transaction amount
+            for i, txn in enumerate(transactions):
+                print(f"[DEBUG] Txn {i+1}: amount={txn.get('amount')}, desc={txn.get('description', '')[:30]}, module={txn.get('module')}", flush=True)
             # Capture parsing metadata for validation warnings
             parsing_metadata = parser.get_parsing_metadata()
             print(f"[DEBUG] Parsing metadata: {parsing_metadata}", flush=True)
@@ -746,6 +781,20 @@ def upload():
         classifier = ClassificationEngine()
         classified = classifier.classify_batch(transactions)
 
+        # DEBUG: Show classified amounts
+        print(f"[DEBUG] After classification:", flush=True)
+        for i, txn in enumerate(classified):
+            print(f"[DEBUG] Classified {i+1}: amount={txn.get('amount')}, module={txn.get('module')}", flush=True)
+
+        # Calculate totals by module (not just by sign) to avoid double-counting
+        by_module_temp = {'CR': [], 'CD': [], 'JV': [], 'UNKNOWN': []}
+        for t in classified:
+            by_module_temp[t.get('module', 'UNKNOWN')].append(t)
+        total_cr = sum(abs(t.get('amount', 0)) for t in by_module_temp['CR'])
+        total_cd = sum(abs(t.get('amount', 0)) for t in by_module_temp['CD'])
+        total_jv = sum(abs(t.get('amount', 0)) for t in by_module_temp['JV'])
+        print(f"[DEBUG] Summary - CR: ${total_cr:.2f}, CD: ${total_cd:.2f}, JV: ${total_jv:.2f}", flush=True)
+
         # FIXED: Use per-user session instead of global variable
         session_data = {
             'transactions': transactions,
@@ -756,7 +805,9 @@ def upload():
             'filename': filename,
             'parsing_metadata': parsing_metadata  # Store for validation warnings
         }
-        save_user_session_data(session_data)
+        print(f"[DEBUG] SAVING SESSION: {len(transactions)} raw, {len(classified)} classified", flush=True)
+        save_result = save_user_session_data(session_data)
+        print(f"[DEBUG] Save result: {save_result}", flush=True)
 
         # Build flash message with warnings
         messages = [f'Parsed {len(transactions)} transactions']
@@ -787,20 +838,34 @@ def review():
     by_module = {'CR': [], 'CD': [], 'JV': [], 'UNKNOWN': []}
     for txn in classified:
         by_module[txn.get('module', 'UNKNOWN')].append(txn)
-    
-    total_in = sum(t.get('amount', 0) for t in classified if t.get('amount', 0) > 0)
-    total_out = sum(abs(t.get('amount', 0)) for t in classified if t.get('amount', 0) < 0)
-    
+
+    # Calculate totals BY MODULE to avoid double-counting
+    # CR total: sum of positive amounts for CR transactions
+    total_cr = sum(abs(t.get('amount', 0)) for t in by_module['CR'])
+    # CD total: sum of negative amounts for CD transactions ONLY (excludes JV fees)
+    total_cd = sum(abs(t.get('amount', 0)) for t in by_module['CD'])
+    # JV total: sum of all JV transaction amounts (fees/interest)
+    total_jv = sum(abs(t.get('amount', 0)) for t in by_module['JV'])
+
+    # Net cash flow = deposits - withdrawals (CD only, not JV)
+    # JV transactions (bank fees, interest) are internal adjustments, not cash flow
+    net_cash_flow = total_cr - total_cd
+
     # Get parsing metadata for validation warnings display
     parsing_metadata = session_data.get('parsing_metadata', {})
 
-    return render_template_string(REVIEW_TEMPLATE,
+    # Create response with no-cache headers to prevent browser caching
+    response = make_response(render_template_string(REVIEW_TEMPLATE,
         transactions=classified, by_module=by_module,
-        summary={'total_credits': total_in, 'total_debits': total_out, 'balance': total_in - total_out},
+        summary={'total_credits': total_cr, 'total_debits': total_cd, 'total_jv': total_jv, 'balance': net_cash_flow},
         gl_codes=GL_CODES, fund_codes=FUND_CODES,
         vendors=get_all_vendors(), customers=get_all_customers(),
         audit_trail=session_data.get('audit_trail', []),
-        parsing_metadata=parsing_metadata)
+        parsing_metadata=parsing_metadata))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route('/update_transaction', methods=['POST'])
 def update_transaction():
@@ -825,7 +890,8 @@ def update_transaction():
             session_data['audit_trail'].append({
                 'timestamp': datetime.now().strftime('%H:%M:%S'),
                 'transaction': txn.get('description', '')[:25],
-                'changes': changes
+                'changes': changes,
+                'action': 'Edit'
             })
             txn['confidence_level'] = 'manual'
 
@@ -876,7 +942,8 @@ def add_transaction():
         session_data['audit_trail'].append({
             'timestamp': datetime.now().strftime('%H:%M:%S'),
             'transaction': f'ADDED: {description[:25]}',
-            'changes': [f'amount: ${abs(float(amount)):,.2f}', f'module: {new_txn["module"]}']
+            'changes': [f'amount: ${abs(float(amount)):,.2f}', f'module: {new_txn["module"]}'],
+            'action': 'Add'
         })
 
         save_user_session_data(session_data)
@@ -909,7 +976,8 @@ def delete_transaction():
         session_data['audit_trail'].append({
             'timestamp': datetime.now().strftime('%H:%M:%S'),
             'transaction': f'DELETED: {desc}',
-            'changes': [f'amount: ${abs(amount):,.2f}']
+            'changes': [f'amount: ${abs(amount):,.2f}'],
+            'action': 'Delete'
         })
 
         save_user_session_data(session_data)
@@ -937,7 +1005,8 @@ def bulk_update():
         session_data['audit_trail'].append({
             'timestamp': datetime.now().strftime('%H:%M:%S'),
             'transaction': f'Bulk ({len(indices)} items)',
-            'changes': [f"{k}={v}" for k,v in updates.items() if v]
+            'changes': [f"{k}={v}" for k,v in updates.items() if v],
+            'action': 'Bulk'
         })
 
         # Save updated session data
@@ -2349,15 +2418,21 @@ def api_import_patterns():
         if not file.filename.endswith('.json'):
             return jsonify({'error': 'Only JSON files supported'}), 400
 
-        # Save temporarily
-        temp_path = os.path.join(DATA_DIR, 'temp_import.json')
-        file.save(temp_path)
+        # Save to temp file (in-memory style)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.json', delete=False) as tmp:
+            file.save(tmp.name)
+            temp_path = tmp.name
 
-        store = get_chroma_store()
-        count = store.import_patterns(temp_path)
-
-        # Clean up
-        os.remove(temp_path)
+        try:
+            store = get_chroma_store()
+            count = store.import_patterns(temp_path)
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
 
         return jsonify({
             'success': True,
@@ -2551,10 +2626,10 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 {% endif %}
 
 <div class="row mb-4">
-<div class="col-md-3"><div class="card text-center bg-success text-white p-3"><h2>{{ by_module.CR|length }}</h2><div>Cash Receipts</div></div></div>
-<div class="col-md-3"><div class="card text-center bg-danger text-white p-3"><h2>{{ by_module.CD|length }}</h2><div>Cash Disbursements</div></div></div>
-<div class="col-md-3"><div class="card text-center bg-warning p-3"><h2>{{ by_module.JV|length }}</h2><div>Journal Vouchers</div></div></div>
-<div class="col-md-3"><div class="card text-center bg-secondary text-white p-3"><h2>{{ by_module.UNKNOWN|length }}</h2><div>Unidentified</div></div></div>
+<div class="col-md-3"><div class="card text-center bg-success text-white p-3 kpi-card" style="cursor:pointer" onclick="filterByModule('cr')" title="Click to view Cash Receipts"><h2>{{ by_module.CR|length }}</h2><div>Cash Receipts</div><small class="opacity-75">${{ '{:,.0f}'.format(summary.total_credits) }}</small></div></div>
+<div class="col-md-3"><div class="card text-center bg-danger text-white p-3 kpi-card" style="cursor:pointer" onclick="filterByModule('cd')" title="Click to view Cash Disbursements"><h2>{{ by_module.CD|length }}</h2><div>Cash Disbursements</div><small class="opacity-75">${{ '{:,.0f}'.format(summary.total_debits) }}</small></div></div>
+<div class="col-md-3"><div class="card text-center bg-warning p-3 kpi-card" style="cursor:pointer" onclick="filterByModule('jv')" title="Click to view Journal Vouchers"><h2>{{ by_module.JV|length }}</h2><div>Journal Vouchers</div><small class="opacity-75">${{ '{:,.0f}'.format(summary.total_jv) if summary.total_jv else 0 }}</small></div></div>
+<div class="col-md-3"><div class="card text-center bg-secondary text-white p-3 kpi-card" style="cursor:pointer" onclick="filterByModule('unk')" title="Click to view Unidentified"><h2>{{ by_module.UNKNOWN|length }}</h2><div>Unidentified</div><small class="opacity-75">{% if by_module.UNKNOWN|length > 0 %}Needs Review{% else %}All Good{% endif %}</small></div></div>
 </div>
 
 <!-- Summary Section - Moved to Top -->
@@ -2594,7 +2669,7 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="tab-content mt-3">
 <div class="tab-pane fade show active" id="all">
 <table class="table table-hover table-sm">
-<thead class="table-light"><tr><th style="width:40px"><input type="checkbox" id="selAll" onchange="toggleAll()"></th><th>Date</th><th>Description</th><th>Amount</th><th>Module</th><th>GL</th><th>Confidence</th><th>Actions</th></tr></thead>
+<thead class="table-light"><tr><th style="width:40px"><input type="checkbox" id="selAll" onchange="toggleAll()"></th><th>Date</th><th>Description</th><th>Amount</th><th>Module</th><th>Customer/Vendor</th><th>GL</th><th>Fund</th><th>Confidence</th><th>Actions</th></tr></thead>
 <tbody>{% for t in transactions %}
 <tr class="{{ 'needs-review' if t.confidence_level in ['low','none'] }}" data-idx="{{ loop.index0 }}">
 <td><input type="checkbox" class="rowCb" value="{{ loop.index0 }}" onchange="updateSel()"></td>
@@ -2602,20 +2677,38 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <td title="{{ t.description }}">{{ t.description[:30] }}{% if t.description|length > 30 %}...{% endif %}</td>
 <td class="{{ 'text-success' if t.amount > 0 else 'text-danger' }}">${{ '{:,.2f}'.format(t.amount|abs) }}</td>
 <td><span class="badge bg-{{ 'success' if t.module=='CR' else 'danger' if t.module=='CD' else 'warning' if t.module=='JV' else 'secondary' }}">{{ t.module }}</span></td>
+<td><span class="text-primary">{{ t.payee or t.vendor or '-' }}</span></td>
 <td>{{ t.gl_code or '-' }}</td>
+<td>{{ t.fund_code or '-' }}</td>
 <td><span class="badge badge-{{ t.confidence_level }}">{{ t.confidence_level }}</span></td>
-<td><button class="btn btn-sm btn-outline-primary edit-btn" data-idx="{{ loop.index0 }}" data-desc="{{ t.description }}" data-module="{{ t.module }}" data-gl="{{ t.gl_code or '' }}" data-fund="{{ t.fund_code or '' }}" data-amt="{{ t.amount }}"><i class="bi bi-pencil"></i></button>
+<td><button class="btn btn-sm btn-outline-primary edit-btn" data-idx="{{ loop.index0 }}" data-desc="{{ t.description }}" data-module="{{ t.module }}" data-gl="{{ t.gl_code or '' }}" data-fund="{{ t.fund_code or '' }}" data-payee="{{ t.payee or t.vendor or '' }}" data-amt="{{ t.amount }}"><i class="bi bi-pencil"></i></button>
 <button class="btn btn-sm btn-outline-danger delete-btn ms-1" data-idx="{{ loop.index0 }}" data-desc="{{ t.description }}" title="Delete"><i class="bi bi-trash"></i></button></td>
 </tr>{% endfor %}</tbody>
 </table></div>
-<div class="tab-pane fade" id="cr">{% if by_module.CR %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>GL</th></tr></thead><tbody>{% for t in by_module.CR %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td class="text-success">${{ '{:,.2f}'.format(t.amount) }}</td><td>{{ t.gl_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No CR transactions</div>{% endif %}</div>
-<div class="tab-pane fade" id="cd">{% if by_module.CD %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>GL</th></tr></thead><tbody>{% for t in by_module.CD %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td class="text-danger">${{ '{:,.2f}'.format(t.amount|abs) }}</td><td>{{ t.gl_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No CD transactions</div>{% endif %}</div>
-<div class="tab-pane fade" id="jv">{% if by_module.JV %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>GL</th></tr></thead><tbody>{% for t in by_module.JV %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td>${{ '{:,.2f}'.format(t.amount|abs) }}</td><td>{{ t.gl_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No JV transactions</div>{% endif %}</div>
+<div class="tab-pane fade" id="cr">{% if by_module.CR %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Customer/Vendor</th><th>GL</th><th>Fund</th></tr></thead><tbody>{% for t in by_module.CR %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td class="text-success">${{ '{:,.2f}'.format(t.amount) }}</td><td class="text-primary">{{ t.payee or t.vendor or '-' }}</td><td>{{ t.gl_code or '-' }}</td><td>{{ t.fund_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No CR transactions</div>{% endif %}</div>
+<div class="tab-pane fade" id="cd">{% if by_module.CD %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Customer/Vendor</th><th>GL</th><th>Fund</th></tr></thead><tbody>{% for t in by_module.CD %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td class="text-danger">${{ '{:,.2f}'.format(t.amount|abs) }}</td><td class="text-primary">{{ t.payee or t.vendor or '-' }}</td><td>{{ t.gl_code or '-' }}</td><td>{{ t.fund_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No CD transactions</div>{% endif %}</div>
+<div class="tab-pane fade" id="jv">{% if by_module.JV %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Customer/Vendor</th><th>GL</th><th>Fund</th></tr></thead><tbody>{% for t in by_module.JV %}<tr><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td>${{ '{:,.2f}'.format(t.amount|abs) }}</td><td class="text-primary">{{ t.payee or t.vendor or '-' }}</td><td>{{ t.gl_code or '-' }}</td><td>{{ t.fund_code or '-' }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-info">No JV transactions</div>{% endif %}</div>
 <div class="tab-pane fade" id="unk">{% if by_module.UNKNOWN %}<table class="table table-sm"><thead><tr><th>Date</th><th>Description</th><th>Amount</th></tr></thead><tbody>{% for t in by_module.UNKNOWN %}<tr class="needs-review"><td>{{ t.date }}</td><td>{{ t.description[:35] }}</td><td>${{ '{:,.2f}'.format(t.amount|abs) }}</td></tr>{% endfor %}</tbody></table>{% else %}<div class="alert alert-success"><i class="bi bi-check-circle"></i> All classified!</div>{% endif %}</div>
 </div></div></div>
 
-{% if audit_trail %}<div class="card mt-4"><div class="card-header"><h5><i class="bi bi-clock-history"></i> Recent Changes</h5></div>
-<div class="card-body" style="max-height:150px;overflow-y:auto">{% for e in audit_trail|reverse %}<div class="audit-item"><small class="text-muted">{{ e.timestamp }}</small> - <strong>{{ e.transaction }}</strong>: {{ e.changes|join(', ') }}</div>{% endfor %}</div></div>{% endif %}
+{% if audit_trail %}<div class="card mt-4 border-info">
+<div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+<h5 class="mb-0"><i class="bi bi-clock-history"></i> Audit Trail ({{ audit_trail|length }} changes)</h5>
+<small>Session: {{ session_id }}</small>
+</div>
+<div class="card-body p-0" style="max-height:200px;overflow-y:auto">
+<table class="table table-sm table-hover mb-0">
+<thead class="table-light sticky-top"><tr><th style="width:120px">Timestamp</th><th>Transaction</th><th>Changes</th><th style="width:80px">Action</th></tr></thead>
+<tbody>{% for e in audit_trail|reverse %}
+<tr><td><small class="text-muted">{{ e.timestamp }}</small></td>
+<td><strong>{{ e.transaction[:40] }}</strong></td>
+<td><small>{{ e.changes|join(' | ') }}</small></td>
+<td><span class="badge bg-{{ 'success' if 'Module' in (e.changes|join('')) else ('warning' if 'GL' in (e.changes|join('')) else 'secondary') }}">{{ e.action if e.action else 'Edit' }}</span></td>
+</tr>{% endfor %}
+</tbody></table>
+</div>
+<div class="card-footer bg-light text-muted small"><i class="bi bi-info-circle"></i> All changes are tracked for compliance. Click Undo to revert last change.</div>
+</div>{% endif %}
 
 <!-- Edit Modal -->
 <div class="modal fade" id="editModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
@@ -2732,15 +2825,18 @@ function onPayeeSelect() {
 
 document.querySelectorAll('.edit-btn').forEach(btn=>{
   btn.onclick=function(){
-    const idx=this.dataset.idx, desc=this.dataset.desc||'', mod=this.dataset.module||'CR', gl=this.dataset.gl||'', fund=this.dataset.fund||'', amt=parseFloat(this.dataset.amt)||0;
+    const idx=this.dataset.idx, desc=this.dataset.desc||'', mod=this.dataset.module||'CR', gl=this.dataset.gl||'', fund=this.dataset.fund||'', payee=this.dataset.payee||'', amt=parseFloat(this.dataset.amt)||0;
     document.getElementById('editIdx').value=idx;
     document.getElementById('editDesc').textContent=desc;
     document.getElementById('editAmt').textContent=(amt>=0?'+':'')+amt.toLocaleString('en-US',{style:'currency',currency:'USD'});
     document.getElementById('editModule').value=mod;
     document.getElementById('editGL').value=gl;
     document.getElementById('editFund').value=fund;
-    document.getElementById('editPayee').value='';
-    document.getElementById('editPayeeSelect').value='';
+    document.getElementById('editPayee').value=payee;
+    // Try to select matching payee in dropdown
+    const payeeSelect=document.getElementById('editPayeeSelect');
+    payeeSelect.value=payee;
+    if(!payeeSelect.value && payee) payeeSelect.value='';
     updateModExplain(amt,desc);
     genSuggestion(desc,amt);
     findVendors(desc);
@@ -2884,6 +2980,21 @@ function applyBulk(){
 }
 function undoLast(){
   fetch('/undo_last',{method:'POST'}).then(r=>r.json()).then(d=>{alert(d.message);if(d.status==='success')location.reload();});
+}
+
+// Filter by module when KPI card is clicked
+function filterByModule(module){
+  // Scroll to transaction section
+  const tabs = document.querySelector('#transactionTabs');
+  if(tabs) {
+    tabs.scrollIntoView({behavior: 'smooth'});
+  }
+  // Click the corresponding tab
+  const tabId = module.toLowerCase();
+  const tabBtn = document.querySelector('[data-bs-target="#' + tabId + '"]');
+  if(tabBtn){
+    tabBtn.click();
+  }
 }
 
 // Initialize Select2 for searchable dropdowns

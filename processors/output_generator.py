@@ -1,48 +1,65 @@
 """
 Output Generator - Generate Excel/CSV files for import into accounting systems
 Creates formatted output files for Cash Receipts, Cash Disbursements, Journal Vouchers
+
+NOTE: This module now generates files in-memory (BytesIO) instead of saving to local disk.
+Files are stored in MongoDB via the web interface (app.py).
 """
 
+import io
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import OUTPUT_DIR, OUTPUT_FILES
+from config import OUTPUT_FILES
 
 class OutputGenerator:
-    """Generate formatted output files for accounting system import"""
-    
-    def __init__(self, output_dir: str = None, target_system: str = 'MIP'):
-        self.output_dir = output_dir or OUTPUT_DIR
+    """Generate formatted output files for accounting system import (in-memory)"""
+
+    def __init__(self, target_system: str = 'MIP'):
+        """
+        Initialize OutputGenerator for in-memory file generation.
+
+        Args:
+            target_system: Target accounting system format (default: 'MIP')
+        """
         self.target_system = target_system
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.generated_files = []
-        
-    def generate_all(self, entries: Dict, timestamp: str = None) -> Dict:
-        """Generate all output files"""
+        self.generated_files = []  # List of (filename, BytesIO) tuples
+
+    def generate_all(self, entries: Dict, timestamp: str = None) -> Dict[str, Tuple[str, io.BytesIO]]:
+        """
+        Generate all output files in-memory.
+
+        Args:
+            entries: Dictionary with CR, CD, JV entries
+            timestamp: Optional timestamp for filenames
+
+        Returns:
+            Dictionary of {module: (filename, BytesIO buffer)}
+        """
         if timestamp is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
+
         files = {}
-        
+
         if entries.get('CR'):
             files['CR'] = self.generate_cash_receipts(entries['CR'], timestamp)
         if entries.get('CD'):
             files['CD'] = self.generate_cash_disbursements(entries['CD'], timestamp)
         if entries.get('JV'):
             files['JV'] = self.generate_journal_vouchers(entries['JV'], timestamp)
-        
+
         return files
-    
-    def generate_cash_receipts(self, entries: List[Dict], timestamp: str) -> str:
-        """Generate Cash Receipts import file"""
+
+    def generate_cash_receipts(self, entries: List[Dict], timestamp: str) -> Tuple[str, io.BytesIO]:
+        """Generate Cash Receipts import file in-memory"""
         import pandas as pd
-        
+
         filename = f"Cash_Receipts_Import_{timestamp}.xlsx"
-        filepath = os.path.join(self.output_dir, filename)
-        
+        buffer = io.BytesIO()
+
         rows = []
         for entry in entries:
             for line in entry.get('lines', []):
@@ -60,19 +77,20 @@ class OutputGenerator:
                     'Reference': entry.get('doc_number', ''),
                     'Needs Review': 'Yes' if entry.get('needs_review') else ''
                 })
-        
+
         df = pd.DataFrame(rows)
-        self._save_with_formatting(df, filepath, 'Cash Receipts')
-        self.generated_files.append(filepath)
-        return filepath
-    
-    def generate_cash_disbursements(self, entries: List[Dict], timestamp: str) -> str:
-        """Generate Cash Disbursements import file"""
+        self._save_with_formatting(df, buffer, 'Cash Receipts')
+        buffer.seek(0)
+        self.generated_files.append((filename, buffer))
+        return (filename, buffer)
+
+    def generate_cash_disbursements(self, entries: List[Dict], timestamp: str) -> Tuple[str, io.BytesIO]:
+        """Generate Cash Disbursements import file in-memory"""
         import pandas as pd
-        
+
         filename = f"Cash_Disbursements_Import_{timestamp}.xlsx"
-        filepath = os.path.join(self.output_dir, filename)
-        
+        buffer = io.BytesIO()
+
         rows = []
         for entry in entries:
             for line in entry.get('lines', []):
@@ -92,19 +110,20 @@ class OutputGenerator:
                     'Reference': entry.get('reference', ''),
                     'Needs Review': 'Yes' if entry.get('needs_review') else ''
                 })
-        
+
         df = pd.DataFrame(rows)
-        self._save_with_formatting(df, filepath, 'Cash Disbursements')
-        self.generated_files.append(filepath)
-        return filepath
-    
-    def generate_journal_vouchers(self, entries: List[Dict], timestamp: str) -> str:
-        """Generate Journal Vouchers import file"""
+        self._save_with_formatting(df, buffer, 'Cash Disbursements')
+        buffer.seek(0)
+        self.generated_files.append((filename, buffer))
+        return (filename, buffer)
+
+    def generate_journal_vouchers(self, entries: List[Dict], timestamp: str) -> Tuple[str, io.BytesIO]:
+        """Generate Journal Vouchers import file in-memory"""
         import pandas as pd
-        
+
         filename = f"Journal_Vouchers_Import_{timestamp}.xlsx"
-        filepath = os.path.join(self.output_dir, filename)
-        
+        buffer = io.BytesIO()
+
         rows = []
         for entry in entries:
             for line in entry.get('lines', []):
@@ -121,19 +140,20 @@ class OutputGenerator:
                     'Reference': entry.get('reference', ''),
                     'Needs Review': 'Yes' if entry.get('needs_review') else ''
                 })
-        
+
         df = pd.DataFrame(rows)
-        self._save_with_formatting(df, filepath, 'Journal Vouchers')
-        self.generated_files.append(filepath)
-        return filepath
-    
-    def generate_unidentified(self, transactions: List[Dict], timestamp: str) -> str:
-        """Generate Unidentified transactions file"""
+        self._save_with_formatting(df, buffer, 'Journal Vouchers')
+        buffer.seek(0)
+        self.generated_files.append((filename, buffer))
+        return (filename, buffer)
+
+    def generate_unidentified(self, transactions: List[Dict], timestamp: str) -> Tuple[str, io.BytesIO]:
+        """Generate Unidentified transactions file in-memory"""
         import pandas as pd
-        
+
         filename = f"Unidentified_{timestamp}.xlsx"
-        filepath = os.path.join(self.output_dir, filename)
-        
+        buffer = io.BytesIO()
+
         rows = []
         for txn in transactions:
             rows.append({
@@ -146,42 +166,43 @@ class OutputGenerator:
                 'Vendor/Customer': '',
                 'Notes': 'Requires manual classification'
             })
-        
+
         df = pd.DataFrame(rows)
-        self._save_with_formatting(df, filepath, 'Unidentified', highlight_all=True)
-        self.generated_files.append(filepath)
-        return filepath
-    
-    def generate_summary_report(self, entries: Dict, classification_summary: Dict, 
-                                routing_summary: Dict, timestamp: str) -> str:
-        """Generate summary report"""
+        self._save_with_formatting(df, buffer, 'Unidentified', highlight_all=True)
+        buffer.seek(0)
+        self.generated_files.append((filename, buffer))
+        return (filename, buffer)
+
+    def generate_summary_report(self, entries: Dict, classification_summary: Dict,
+                                routing_summary: Dict, timestamp: str) -> Tuple[str, io.BytesIO]:
+        """Generate summary report in-memory"""
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
-        
+
         filename = f"Processing_Summary_{timestamp}.xlsx"
-        filepath = os.path.join(self.output_dir, filename)
-        
+        buffer = io.BytesIO()
+
         wb = Workbook()
         ws = wb.active
         ws.title = "Summary"
-        
+
         ws['A1'] = "Bank Transaction Posting Tool - Processing Summary"
         ws['A1'].font = Font(bold=True, size=14)
         ws['A2'] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
+
         ws['A4'] = "Classification Summary"
         ws['A4'].font = Font(bold=True)
         row = 5
         ws[f'A{row}'] = "Total Transactions"
         ws[f'B{row}'] = classification_summary.get('total', 0)
-        
+
         row += 1
         ws[f'A{row}'] = "By Module:"
         for module, count in classification_summary.get('by_module', {}).items():
             row += 1
             ws[f'A{row}'] = f"  {module}"
             ws[f'B{row}'] = count
-        
+
         row += 2
         ws[f'A{row}'] = "Amount Summary"
         ws[f'A{row}'].font = Font(bold=True)
@@ -191,28 +212,29 @@ class OutputGenerator:
         row += 1
         ws[f'A{row}'] = "Total Debits"
         ws[f'B{row}'] = f"${classification_summary.get('total_debits', 0):,.2f}"
-        
+
         ws.column_dimensions['A'].width = 30
         ws.column_dimensions['B'].width = 20
-        
-        wb.save(filepath)
-        self.generated_files.append(filepath)
-        return filepath
-    
-    def _save_with_formatting(self, df, filepath: str, sheet_name: str, highlight_all: bool = False):
-        """Save DataFrame with professional formatting"""
+
+        wb.save(buffer)
+        buffer.seek(0)
+        self.generated_files.append((filename, buffer))
+        return (filename, buffer)
+
+    def _save_with_formatting(self, df, buffer: io.BytesIO, sheet_name: str, highlight_all: bool = False):
+        """Save DataFrame with professional formatting to BytesIO buffer"""
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils.dataframe import dataframe_to_rows
-        
+
         wb = Workbook()
         ws = wb.active
         ws.title = sheet_name
-        
+
         for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), 1):
             for c_idx, value in enumerate(row, 1):
                 cell = ws.cell(row=r_idx, column=c_idx, value=value)
-                
+
                 if r_idx == 1:
                     cell.font = Font(bold=True, color='FFFFFF')
                     cell.fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
@@ -222,7 +244,7 @@ class OutputGenerator:
                         for col in range(1, len(row) + 1):
                             ws.cell(row=r_idx, column=col).fill = PatternFill(
                                 start_color='FFFF00', end_color='FFFF00', fill_type='solid')
-        
+
         for column in ws.columns:
             max_length = 0
             column_letter = column[0].column_letter
@@ -233,18 +255,20 @@ class OutputGenerator:
                 except:
                     pass
             ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
-        
+
         ws.auto_filter.ref = ws.dimensions
         ws.freeze_panes = 'A2'
-        wb.save(filepath)
-    
-    def get_generated_files(self) -> List[str]:
+        wb.save(buffer)
+
+    def get_generated_files(self) -> List[Tuple[str, io.BytesIO]]:
+        """Return list of (filename, BytesIO buffer) tuples"""
         return self.generated_files
 
 
 if __name__ == "__main__":
+    # Test in-memory generation
     generator = OutputGenerator()
-    
+
     test_entries = {
         'CR': [{
             'session_id': 'GP_CR_2024', 'doc_number': 'GP_1201_001', 'doc_date': '12/01/2024',
@@ -272,6 +296,8 @@ if __name__ == "__main__":
             ], 'needs_review': False
         }]
     }
-    
+
     files = generator.generate_all(test_entries)
-    print("Generated Files:", files)
+    print("Generated Files (in-memory):")
+    for module, (filename, buffer) in files.items():
+        print(f"  {module}: {filename} ({len(buffer.getvalue())} bytes)")
