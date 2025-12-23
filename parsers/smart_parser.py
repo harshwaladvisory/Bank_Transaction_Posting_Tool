@@ -1422,9 +1422,14 @@ class SmartParser:
                 match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2,4})$', date_str)
                 if match:
                     month, day, year = match.groups()
+                    month_int, day_int = int(month), int(day)
                     if len(year) == 2:
                         year = '20' + year
-                    return f"{int(month):02d}/{int(day):02d}/{year}"
+                    # Validate date is reasonable
+                    if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                        return f"{month_int:02d}/{day_int:02d}/{year}"
+                    # Invalid date - return None to trigger OCR fix
+                    return None
 
             # Fallback: try to parse any date format
             for fmt in ['%m/%d/%Y', '%m/%d/%y', '%m-%d-%Y', '%m-%d-%y']:
@@ -2772,6 +2777,11 @@ class SmartParser:
             r'(\d{1,2}/\d{1,2}/\d{4})\s+(\w+)\s+\(\$?([\d,]+\.\d{2})\)\s+\$?([\d,]+)',
         ]
 
+        # OCR-GARBLED pattern: date + any garbage text + parenthetical amount + balance
+        # This handles lines like: "04/97/2025 ccm END cain ( $145.00) $706,222.18"
+        # where "Withdrawal" was OCR'd as "ccm END cain"
+        ocr_garbled_withdrawal_pattern = r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s*\(\s*\$?\s*([\d,]+\.\d{2})\s*\)\s+\$?([\d,]+\.\d{2})'
+
         # OCR-tolerant pattern: date + withdrawal keyword anywhere + we'll get amount from summary
         ocr_withdrawal_pattern = r'(\d{1,2}/\d{1,2}/\d{4}).*?[Ww]ithdrawal'
 
@@ -2857,7 +2867,73 @@ class SmartParser:
                             print(f"[DEBUG] CrossFirst detail parse failed: {e}", flush=True)
                         continue
 
-            # If no exact match, try OCR-tolerant pattern to at least get the date
+            # If no exact match, try OCR-garbled pattern for lines with parenthetical amounts
+            # This handles: "04/97/2025 ccm END cain ( $145.00) $706,222.18"
+            if not matched:
+                garbled_match = re.search(ocr_garbled_withdrawal_pattern, line)
+                if garbled_match:
+                    try:
+                        date_str = garbled_match.group(1)
+                        ocr_description = garbled_match.group(2).strip()
+                        amount_str = garbled_match.group(3)
+
+                        # Parse amount from parenthetical format (indicates withdrawal/negative)
+                        ocr_amount = float(amount_str.replace(',', ''))
+
+                        # Validate against expected withdrawal if available
+                        if expected_withdrawal > 0:
+                            ratio = ocr_amount / expected_withdrawal if expected_withdrawal else 999
+                            if ratio > 5 or ratio < 0.2:
+                                if self.debug:
+                                    print(f"[DEBUG] CrossFirst OCR garbled: amount ${ocr_amount:.2f} rejected (expected ${expected_withdrawal:.2f})", flush=True)
+                                amount = expected_withdrawal
+                            else:
+                                amount = ocr_amount
+                        else:
+                            amount = ocr_amount
+
+                        # Fix garbled date (04/97/2025 -> 04/17/2025)
+                        date = self._format_date(date_str, 'MM/DD/YYYY')
+                        if not date:
+                            date = self._fix_ocr_date(date_str)
+                        if not date:
+                            # Still try to capture the date for later
+                            withdrawal_date_from_detail = date_str
+                            continue
+
+                        # Skip if already seen
+                        key = (date, round(amount, 2), 'WITHDRAWAL')
+                        if key in seen:
+                            continue
+                        seen.add(key)
+
+                        # Clean up description - if it's garbage, use "Withdrawal"
+                        description = 'Withdrawal'
+                        if ocr_description.lower() in ['withdrawal', 'withdrawl', 'withdraw']:
+                            description = 'Withdrawal'
+
+                        transactions.append({
+                            'date': date,
+                            'description': description,
+                            'amount': -abs(amount),  # Withdrawals are negative
+                            'is_deposit': False,
+                            'module': 'CD',
+                            'confidence_score': 85,
+                            'confidence_level': 'high',
+                            'parsed_by': 'crossfirst_detail_ocr_garbled',
+                            'pattern_used': 'ocr_garbled_parens_amount'
+                        })
+
+                        if self.debug:
+                            print(f"[DEBUG] CrossFirst OCR-garbled withdrawal: {date} ${amount:.2f} (OCR text: '{ocr_description}')", flush=True)
+
+                        matched = True
+
+                    except Exception as e:
+                        if self.debug:
+                            print(f"[DEBUG] CrossFirst OCR-garbled parse failed: {e}", flush=True)
+
+            # If still no match, try OCR-tolerant pattern to at least get the date
             if not matched and withdrawal_date_from_detail is None:
                 ocr_match = re.search(ocr_withdrawal_pattern, line)
                 if ocr_match:
