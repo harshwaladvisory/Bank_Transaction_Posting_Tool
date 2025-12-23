@@ -633,28 +633,99 @@ def save_user_session_data(data):
 def generate_transaction_hash(txn):
     """Generate unique hash for duplicate detection"""
     import hashlib
-    # Create hash from date, amount, description, and check number
-    key = f"{txn.get('date', '')}|{txn.get('amount', 0)}|{txn.get('description', '')}|{txn.get('check_number', '')}"
+
+    check_number = txn.get('check_number', '')
+    description = txn.get('description', '').upper()
+    is_check = bool(check_number) or 'CHECK' in description
+    is_deposit = txn.get('is_deposit', False) or txn.get('module') == 'CR' or 'DEPOSIT' in description
+
+    if is_check and check_number:
+        # For checks, use check number as primary identifier (checks are unique)
+        key = f"CHECK|{check_number}|{txn.get('amount', 0)}"
+    elif is_deposit:
+        # For deposits, include a unique index to allow legitimate duplicates
+        # Banks legitimately process multiple deposits of same amount on same day
+        # Use reference_number if available, otherwise use parsed_by + position hint
+        ref_num = txn.get('reference_number', '') or txn.get('deposit_slip_number', '')
+        if ref_num:
+            key = f"{txn.get('date', '')}|{txn.get('amount', 0)}|DEPOSIT|{ref_num}"
+        else:
+            # For deposits without reference numbers, create unique key using position
+            # This prevents flagging legitimate same-day, same-amount deposits
+            position = txn.get('_position', id(txn))  # Use object id as fallback
+            key = f"{txn.get('date', '')}|{txn.get('amount', 0)}|DEPOSIT|pos_{position}"
+    else:
+        # For other transactions (fees, etc.), use full details
+        key = f"{txn.get('date', '')}|{txn.get('amount', 0)}|{description}|{check_number}"
+
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 def check_for_duplicates(transactions):
-    """Check for duplicate transactions in MongoDB and within current batch"""
+    """
+    Check for duplicate transactions in MongoDB and within current batch.
+
+    Duplicate detection rules:
+    - CHECKS: Duplicate if same check number (checks are unique identifiers)
+    - DEPOSITS: NOT duplicates just because same date/amount (banks process multiple deposits daily)
+    - FEES/OTHER: Duplicate if same date + amount + description
+    """
     db = get_db()
     duplicates_found = []
-    seen_in_batch = set()
+    seen_in_batch = {}  # Changed to dict to track check numbers specifically
+    seen_check_numbers = set()
 
     for i, txn in enumerate(transactions):
+        # Add position hint for hash generation
+        txn['_position'] = i
+
         # Generate hash
         txn_hash = generate_transaction_hash(txn)
         txn['txn_hash'] = txn_hash
 
-        # Check within current batch
+        check_number = txn.get('check_number', '')
+        description = txn.get('description', '').upper()
+        is_check = bool(check_number) or 'CHECK' in description
+        is_deposit = txn.get('is_deposit', False) or txn.get('module') == 'CR' or 'DEPOSIT' in description
+
+        # Special handling for checks - check numbers must be unique
+        if is_check and check_number:
+            if check_number in seen_check_numbers:
+                txn['is_duplicate'] = True
+                txn['duplicate_source'] = 'current_batch'
+                txn['duplicate_reason'] = f'Duplicate check number: {check_number}'
+                duplicates_found.append(i)
+                continue
+            else:
+                seen_check_numbers.add(check_number)
+
+        # For deposits, do NOT flag as duplicate within same batch
+        # Multiple deposits of same amount on same day are legitimate
+        if is_deposit:
+            txn['is_duplicate'] = False
+            # Still check MongoDB for cross-batch duplicates using reference numbers
+            if db is not None and txn.get('reference_number'):
+                try:
+                    existing = db.transactions.find_one({
+                        'reference_number': txn['reference_number'],
+                        'date': txn.get('date'),
+                        'amount': txn.get('amount')
+                    })
+                    if existing:
+                        txn['is_duplicate'] = True
+                        txn['duplicate_source'] = 'database'
+                        txn['duplicate_batch_id'] = existing.get('batch_id')
+                        duplicates_found.append(i)
+                except Exception as e:
+                    print(f"Error checking deposit duplicates: {e}")
+            continue
+
+        # For non-deposit, non-check transactions (fees, etc.)
         if txn_hash in seen_in_batch:
             txn['is_duplicate'] = True
             txn['duplicate_source'] = 'current_batch'
             duplicates_found.append(i)
         else:
-            seen_in_batch.add(txn_hash)
+            seen_in_batch[txn_hash] = i
 
             # Check in MongoDB
             if db is not None:
@@ -672,6 +743,10 @@ def check_for_duplicates(transactions):
                     txn['is_duplicate'] = False
             else:
                 txn['is_duplicate'] = False
+
+    # Clean up position hints
+    for txn in transactions:
+        txn.pop('_position', None)
 
     return duplicates_found
 
@@ -834,7 +909,7 @@ def review():
     if not classified:
         flash('No transactions. Upload a file first.', 'warning')
         return redirect(url_for('index'))
-    
+
     by_module = {'CR': [], 'CD': [], 'JV': [], 'UNKNOWN': []}
     for txn in classified:
         by_module[txn.get('module', 'UNKNOWN')].append(txn)
@@ -851,6 +926,34 @@ def review():
     # JV transactions (bank fees, interest) are internal adjustments, not cash flow
     net_cash_flow = total_cr - total_cd
 
+    # Calculate year-segregated totals for audit trail
+    by_year = {}
+    for txn in classified:
+        # Extract year from date (format: MM/DD/YYYY)
+        date_str = txn.get('date', '')
+        try:
+            if '/' in date_str:
+                parts = date_str.split('/')
+                if len(parts) == 3:
+                    year = int(parts[2])
+                else:
+                    year = 'Unknown'
+            else:
+                year = 'Unknown'
+        except:
+            year = 'Unknown'
+
+        if year not in by_year:
+            by_year[year] = {'deposits': 0, 'withdrawals': 0, 'count': 0, 'transactions': []}
+
+        by_year[year]['count'] += 1
+        by_year[year]['transactions'].append(txn)
+
+        if txn.get('module') == 'CR':
+            by_year[year]['deposits'] += abs(txn.get('amount', 0))
+        elif txn.get('module') == 'CD':
+            by_year[year]['withdrawals'] += abs(txn.get('amount', 0))
+
     # Get parsing metadata for validation warnings display
     parsing_metadata = session_data.get('parsing_metadata', {})
 
@@ -858,6 +961,7 @@ def review():
     response = make_response(render_template_string(REVIEW_TEMPLATE,
         transactions=classified, by_module=by_module,
         summary={'total_credits': total_cr, 'total_debits': total_cd, 'total_jv': total_jv, 'balance': net_cash_flow},
+        by_year=by_year,
         gl_codes=GL_CODES, fund_codes=FUND_CODES,
         vendors=get_all_vendors(), customers=get_all_customers(),
         audit_trail=session_data.get('audit_trail', []),
@@ -2609,7 +2713,7 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="col-md-6">
 <div class="p-3 bg-light rounded">
 <p class="mb-1"><strong>Bank:</strong> {{ parsing_metadata.bank_name or 'Unknown' }}</p>
-<p class="mb-1"><strong>Statement Period:</strong> {{ parsing_metadata.statement_month or 'N/A' }}/{{ parsing_metadata.statement_year or 'N/A' }}</p>
+<p class="mb-1"><strong>Statement Period:</strong> {{ parsing_metadata.statement_period or (parsing_metadata.statement_month|string + '/' + parsing_metadata.statement_year|string if parsing_metadata.statement_month else 'N/A') }}</p>
 <p class="mb-1"><strong>OCR Used:</strong> {% if parsing_metadata.ocr_used %}<span class="badge bg-warning text-dark">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</p>
 {% if parsing_metadata.quality_score is defined %}
 <p class="mb-0"><strong>Quality Score:</strong>
@@ -2638,7 +2742,24 @@ REVIEW_TEMPLATE = '''<!DOCTYPE html>
 <div class="col-md-4"><div class="card border-success"><div class="card-body text-center"><h6 class="text-muted">Total Deposits</h6><h3 class="text-success">${{ '{:,.2f}'.format(summary.total_credits) }}</h3></div></div></div>
 <div class="col-md-4"><div class="card border-danger"><div class="card-body text-center"><h6 class="text-muted">Total Withdrawals</h6><h3 class="text-danger">${{ '{:,.2f}'.format(summary.total_debits) }}</h3></div></div></div>
 <div class="col-md-4"><div class="card border-info"><div class="card-body text-center"><h6 class="text-muted">Net Cash Flow</h6><h3 class="{{ 'text-success' if summary.balance >= 0 else 'text-danger' }}">{% if summary.balance >= 0 %}↑${{ '{:,.2f}'.format(summary.balance) }}{% else %}↓${{ '{:,.2f}'.format(summary.balance|abs) }}{% endif %}</h3></div></div></div>
-</div></div></div>
+</div>
+{% if by_year and by_year|length > 1 %}
+<hr class="my-3">
+<h6 class="text-muted mb-2"><i class="bi bi-calendar3"></i> By Fiscal Year</h6>
+<div class="row">
+{% for year, data in by_year|dictsort(reverse=true) %}
+<div class="col-md-{{ 12 // (by_year|length) if by_year|length <= 4 else 3 }}">
+<div class="card bg-light mb-2"><div class="card-body py-2 px-3">
+<h6 class="mb-1 fw-bold">FY {{ year }}</h6>
+<small class="d-block text-success">Deposits: ${{ '{:,.2f}'.format(data.deposits) }}</small>
+<small class="d-block text-danger">Withdrawals: ${{ '{:,.2f}'.format(data.withdrawals) }}</small>
+<small class="d-block text-muted">{{ data.count }} transaction{{ 's' if data.count != 1 else '' }}</small>
+</div></div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+</div></div>
 
 <div class="card mb-3 d-none" id="bulkBar"><div class="card-body bg-light">
 <div class="row align-items-center">

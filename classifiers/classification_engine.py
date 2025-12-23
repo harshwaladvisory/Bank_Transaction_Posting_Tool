@@ -65,7 +65,7 @@ GL_CODE_MAPPING = {
     'telecommunications': {'gl': '7100', 'name': 'Telecommunications', 'module': 'CD'},
     'taxes': {'gl': '7200', 'name': 'Taxes (IRS/State)', 'module': 'CD'},
     'vendor_payment': {'gl': '7300', 'name': 'Vendor Payments', 'module': 'CD'},
-    'bank_fees': {'gl': '7500', 'name': 'Bank Fees & Charges', 'module': 'JV'},
+    'bank_fees': {'gl': '6100', 'name': 'Bank Fees & Charges', 'module': 'CD'},
     'interest_expense': {'gl': '7600', 'name': 'Interest Expense', 'module': 'JV'},
     'miscellaneous': {'gl': '7900', 'name': 'Miscellaneous Expense', 'module': 'CD'},
 }
@@ -118,6 +118,7 @@ KEYWORD_GL_MAPPING = {
     'bank fee': 'bank_fees', 'service charge': 'bank_fees', 'monthly fee': 'bank_fees',
     'maintenance fee': 'bank_fees', 'nsf': 'bank_fees', 'overdraft': 'bank_fees',
     'wire fee': 'bank_fees', 'analysis charge': 'bank_fees',
+    'service fee': 'bank_fees',  # Bank service fees
     'interest charge': 'interest_expense', 'finance charge': 'interest_expense',
 }
 
@@ -172,6 +173,22 @@ class ClassificationEngine:
 
         desc_lower = description.lower() if description else ''
 
+        # 0. CRITICAL: DEBIT keyword detection - HIGHEST PRIORITY
+        # "ACH CORP DEBIT", "DEBIT" in description = ALWAYS Cash Disbursement
+        # This overrides all other classification rules because DEBIT explicitly means money OUT
+        if 'debit' in desc_lower:
+            debit_result = {
+                'module': 'CD',
+                'confidence': 0.99,  # Highest confidence
+                'classifier': 'debit_keyword',
+                'priority': 0,  # Highest priority (lower number = higher priority)
+                'gl_code': '7200' if 'payroll' in desc_lower else '7900',
+                'category': 'ACH Debit Payment'
+            }
+            results['classifications'].append(debit_result)
+            # Override transaction direction - DEBIT is ALWAYS a withdrawal
+            transaction_is_deposit = False
+
         # 1. Check for check number - always CD
         if check_number or 'check #' in desc_lower or 'check no' in desc_lower:
             check_result = {
@@ -183,6 +200,36 @@ class ClassificationEngine:
                 'category': 'Check Payment'
             }
             results['classifications'].append(check_result)
+
+        # 1.5. High-confidence bank-generated transaction detection
+        # These transactions are unambiguous - they come directly from the bank
+        HIGH_CONFIDENCE_BANK_KEYWORDS = {
+            'interest': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
+            'interest credit': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
+            'interest earned': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
+            'interest paid': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
+            'service fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Fee'},
+            'service charge': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Charge'},
+            'monthly fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Monthly Fee'},
+            'maintenance fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Maintenance Fee'},
+            'nsf fee': {'module': 'CD', 'gl_code': '6100', 'category': 'NSF Fee'},
+            'overdraft fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Overdraft Fee'},
+            'wire transfer fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Transfer Fee'},
+            'wire fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Fee'},
+        }
+
+        for keyword, info in HIGH_CONFIDENCE_BANK_KEYWORDS.items():
+            if keyword in desc_lower:
+                bank_txn_result = {
+                    'module': info['module'],
+                    'confidence': 0.95,  # High confidence - bank-generated
+                    'classifier': 'bank_transaction',
+                    'priority': 1,
+                    'gl_code': info['gl_code'],
+                    'category': info['category']
+                }
+                results['classifications'].append(bank_txn_result)
+                break  # Only match first keyword
 
         # 2. Check learned patterns first (highest priority for non-checks)
         history_result = self.history_matcher.match(description, amount)

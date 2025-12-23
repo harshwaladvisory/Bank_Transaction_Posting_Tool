@@ -68,7 +68,7 @@ POPPLER_PATH = r'C:\Users\sanjana.thakur\poppler\Library\bin'  # Windows default
 # Flask settings
 FLASK_HOST = '0.0.0.0'  # Listen on all interfaces for deployment
 FLASK_PORT = int(os.environ.get('PORT', 8590))  # Default to 8590, configurable via environment
-FLASK_DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+FLASK_DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'  # Enable auto-reload
 
 # Logging settings
 LOG_FILE = os.path.join(LOG_DIR, 'audit_trail.json')

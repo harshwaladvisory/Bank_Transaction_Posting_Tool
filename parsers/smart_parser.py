@@ -93,6 +93,8 @@ class SmartParser:
         self._ocr_used = False
         self._ocr_fixes = []
         self._crossfirst_withdrawal_date = None  # Date from OCR-detected withdrawal detail line
+        self._statement_period_start = None
+        self._statement_period_end = None
 
     def _load_templates(self, path: str) -> Dict:
         """Load bank templates from JSON file."""
@@ -137,6 +139,9 @@ class SmartParser:
 
         # Step 3: Extract year
         self._extract_year(text)
+
+        # Step 3.5: Extract statement period
+        self._extract_statement_period(text)
 
         # Step 4: Parse transactions
         transactions = []
@@ -362,6 +367,103 @@ class SmartParser:
         if match:
             self.statement_year = int(match.group(1))
 
+    def _extract_statement_period(self, text: str):
+        """
+        Extract statement period dates for different bank formats.
+
+        Supported formats:
+        - Farmers: "FROM DATE: MM/DD TO DATE: MM/DD/YYYY"
+        - Sovereign: "Statement Ending MM/DD/YYYY" + "MM/DD/YYYY Beginning Balance"
+        - CrossFirst: Standard date pair format
+        - Truist: Various header formats
+        """
+        bank_upper = (self.bank_name or '').upper()
+
+        # Farmers Bank format: "FROM DATE: MM/DD TO DATE: MM/DD/YYYY"
+        if 'FARMERS' in bank_upper:
+            # Pattern: two dates, second one with year
+            match = re.search(r'(\d{1,2}/\d{1,2})\s+(\d{1,2}/\d{1,2})/(\d{4})', text)
+            if match:
+                year = match.group(3)
+                self._statement_period_start = f"{match.group(1)}/{year}"
+                self._statement_period_end = f"{match.group(2)}/{year}"
+                if self.debug:
+                    print(f"[DEBUG] Farmers statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+                return
+
+        # Sovereign Bank format: "Statement Ending MM/DD/YYYY"
+        if 'SOVEREIGN' in bank_upper:
+            # Look for Statement Ending date
+            end_match = re.search(r'Statement\s+Ending[:\s]*(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+            if end_match:
+                self._statement_period_end = end_match.group(1)
+
+            # Look for Beginning Balance date
+            start_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})\s+Beginning\s+Balance', text, re.IGNORECASE)
+            if start_match:
+                self._statement_period_start = start_match.group(1)
+            else:
+                # Try first date of month pattern
+                end_date = self._statement_period_end
+                if end_date:
+                    parts = end_date.split('/')
+                    if len(parts) == 3:
+                        self._statement_period_start = f"{parts[0]}/01/{parts[2]}"
+
+            if self.debug and self._statement_period_end:
+                print(f"[DEBUG] Sovereign statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+            return
+
+        # CrossFirst Bank format: Statement period in header
+        if 'CROSSFIRST' in bank_upper or 'CROSS FIRST' in bank_upper:
+            # Look for date range pattern
+            match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})\s*[-–to]+\s*(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+            if match:
+                self._statement_period_start = match.group(1)
+                self._statement_period_end = match.group(2)
+            else:
+                # Try ending balance date
+                end_match = re.search(r'Ending\s+Balance[:\s]*.*?(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+                if end_match:
+                    self._statement_period_end = end_match.group(1)
+            if self.debug and self._statement_period_end:
+                print(f"[DEBUG] CrossFirst statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+            return
+
+        # Truist Bank format
+        if 'TRUIST' in bank_upper:
+            # Look for statement period pattern
+            match = re.search(r'(?:Statement\s+)?Period[:\s]*(\d{1,2}/\d{1,2}/\d{4})\s*[-–to]+\s*(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+            if match:
+                self._statement_period_start = match.group(1)
+                self._statement_period_end = match.group(2)
+            if self.debug and self._statement_period_end:
+                print(f"[DEBUG] Truist statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+            return
+
+        # PNC Bank format
+        if 'PNC' in bank_upper:
+            match = re.search(r'(?:Statement\s+)?Period[:\s]*(\d{1,2}/\d{1,2}/\d{4})\s*[-–to]+\s*(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+            if match:
+                self._statement_period_start = match.group(1)
+                self._statement_period_end = match.group(2)
+            if self.debug and self._statement_period_end:
+                print(f"[DEBUG] PNC statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+            return
+
+        # Generic fallback: Look for any date range pattern
+        match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})\s*[-–to]+\s*(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+        if match:
+            self._statement_period_start = match.group(1)
+            self._statement_period_end = match.group(2)
+            if self.debug:
+                print(f"[DEBUG] Generic statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+            return
+
+        # Last resort: Use first and last transaction dates
+        if self.debug:
+            print(f"[DEBUG] Could not extract statement period from header text", flush=True)
+
     def _parse_with_template(self, text: str, template: Dict) -> List[Dict]:
         """
         Parse statement using bank-specific template.
@@ -548,8 +650,16 @@ class SmartParser:
                             continue
 
                         # Determine transaction type
-                        # Priority: 1) Pattern type, 2) Section tracking, 3) Keywords
-                        if txn_type == 'withdrawal':
+                        # Priority: 1) DEBIT keyword (always withdrawal), 2) Pattern type, 3) Section tracking, 4) Keywords
+                        # CRITICAL: "DEBIT" in description = ALWAYS withdrawal regardless of section
+                        desc_upper = description.upper() if description else ''
+                        if 'DEBIT' in desc_upper:
+                            # ACH CORP DEBIT = Cash Disbursement (money going out)
+                            amount = -abs(amount)
+                            is_deposit = False
+                            if self.debug:
+                                print(f"[DEBUG] DEBIT keyword override - marking as withdrawal: {description[:30]}", flush=True)
+                        elif txn_type == 'withdrawal':
                             amount = -abs(amount)
                             is_deposit = False
                         elif txn_type == 'deposit':
@@ -617,7 +727,13 @@ class SmartParser:
         if self.bank_name == 'Truist':
             transactions.extend(self._parse_multicolumn_checks(text, date_format, seen))
             # Also parse deposits section with special handling for garbled OCR
-            transactions.extend(self._parse_truist_deposits(text, date_format, seen))
+            # Returns tuple: (deposits, skipped_debits) where skipped_debits are DEBIT transactions
+            # that appeared in the deposit section but should be classified as CD
+            truist_deposits, truist_recovered_debits = self._parse_truist_deposits(text, date_format, seen)
+            transactions.extend(truist_deposits)
+            transactions.extend(truist_recovered_debits)
+            if self.debug and truist_recovered_debits:
+                print(f"[DEBUG] Truist: Recovered {len(truist_recovered_debits)} DEBIT transactions from deposit section as CD", flush=True)
 
         # CrossFirst: parse detailed transaction lines from Account Transaction Detail
         if self.bank_name == 'CrossFirst':
@@ -792,9 +908,16 @@ class SmartParser:
 
         return checks
 
-    def _parse_truist_deposits(self, text: str, date_format: str, seen: set) -> List[Dict]:
-        """Parse Truist deposits section with special OCR handling."""
+    def _parse_truist_deposits(self, text: str, date_format: str, seen: set) -> tuple:
+        """Parse Truist deposits section with special OCR handling.
+
+        Returns:
+            tuple: (deposits list, skipped_debits list)
+            - deposits: List of deposit transactions (CR)
+            - skipped_debits: List of DEBIT transactions found in deposit section (CD)
+        """
         deposits = []
+        skipped_debits = []  # DEBIT transactions that appear in deposit section
         lines = text.split('\n')
 
         in_deposits_section = False
@@ -834,6 +957,31 @@ class SmartParser:
                     description = re.sub(r'[^\w\s\-]', '', description)
                     description = re.sub(r'\s+', ' ', description).strip()
 
+                    # CRITICAL: DEBIT transactions are withdrawals, not deposits!
+                    # "ACH CORP DEBIT" = money going OUT = Cash Disbursement
+                    # Capture them as withdrawals instead of just skipping
+                    if 'debit' in description.lower():
+                        if self.debug:
+                            print(f"[DEBUG] Skipping DEBIT from deposits: {date} {description[:30]} ${amount:.2f}", flush=True)
+                        # Dedup check for DEBIT - use WITHDRAWAL key for consistency with main parser
+                        key = (date, round(abs(amount), 2), 'WITHDRAWAL')
+                        if key not in seen:
+                            seen.add(key)
+                            skipped_debits.append({
+                                'date': date,
+                                'description': description[:100],
+                                'amount': -abs(amount),  # Negative for withdrawal
+                                'is_deposit': False,
+                                'module': 'CD',
+                                'confidence_score': 85,
+                                'confidence_level': 'high',
+                                'parsed_by': 'template',
+                                'pattern_used': 'truist_deposit_debit_recovery'
+                            })
+                            if self.debug:
+                                print(f"[DEBUG] Recovered DEBIT as CD: {date} {description[:30]} ${amount:.2f}", flush=True)
+                        continue
+
                     # Determine if it's a deposit or Wixcom payment
                     if 'wixcom' in description.lower():
                         description = f"Wixcom {description}"
@@ -868,7 +1016,7 @@ class SmartParser:
                         print(f"[DEBUG] Truist deposit parse failed: {e}", flush=True)
                     continue
 
-        return deposits
+        return deposits, skipped_debits
 
     def _fix_ocr_date(self, date_str: str) -> str:
         """Fix common OCR errors in dates (e.g., 04/97 -> 04/07)."""
@@ -1065,8 +1213,14 @@ class SmartParser:
             if not date:
                 return None
 
-            # Use section to determine type
-            is_deposit = (section == 'deposit')
+            # Use section to determine type, BUT override if description contains DEBIT
+            # "DEBIT" in description ALWAYS means withdrawal regardless of section
+            desc_upper = description.upper()
+            if 'DEBIT' in desc_upper:
+                is_deposit = False  # DEBIT = Cash Disbursement
+            else:
+                is_deposit = (section == 'deposit')
+
             if not is_deposit:
                 amount = -abs(amount)
             else:
@@ -1499,30 +1653,161 @@ class SmartParser:
         2. Activity section (date, amount, description)
         3. Filters out DAILY BALANCE INFORMATION section
         4. Filters out check image pages
+        5. Multi-year statements (extracts year from each statement page's TO DATE)
         """
         transactions = []
-        seen = set()
 
-        # Clean the text first - remove non-transaction sections
-        cleaned_text = self._clean_farmers_text(text, template)
+        # Split text into statement pages and parse each with its own year
+        # Farmers Bank statements have format: "FROM DATE: MM/DD TO DATE: MM/DD/YYYY"
+        statement_pages = self._split_farmers_by_statement_period(text)
 
-        # Parse NUMBERED CHECKS section
-        checks = self._parse_farmers_numbered_checks(cleaned_text, template)
-        for check in checks:
-            key = (check['date'], abs(check['amount']), 'CHECK')
-            if key not in seen:
-                seen.add(key)
-                transactions.append(check)
+        if self.debug:
+            print(f"[DEBUG] Found {len(statement_pages)} statement period(s) in Farmers PDF", flush=True)
 
-        # Parse activity section (deposits, fees, etc.)
-        activity = self._parse_farmers_activity(cleaned_text, template)
-        for txn in activity:
-            key = (txn['date'], abs(txn['amount']), txn['description'][:20])
-            if key not in seen:
-                seen.add(key)
-                transactions.append(txn)
+        # Track duplicates using a more flexible key that includes check_number
+        # For deposits: use (date, amount, description, 'DEPOSIT', occurrence_count)
+        deposit_counts = {}  # Track how many times we've seen each deposit
+        check_nums_seen = set()  # Track check numbers to avoid duplicates
+
+        for page_year, page_text in statement_pages:
+            # Temporarily set the statement year for this page
+            original_year = self.statement_year
+            self.statement_year = page_year
+
+            if self.debug:
+                print(f"[DEBUG] Processing Farmers statement page with year: {page_year}", flush=True)
+
+            # Clean the text first - remove non-transaction sections
+            cleaned_text = self._clean_farmers_text(page_text, template)
+
+            # Parse NUMBERED CHECKS section
+            checks = self._parse_farmers_numbered_checks(cleaned_text, template)
+            for check in checks:
+                check_num = check.get('check_number', '')
+                # Use check_number as the unique key (prevents duplicate checks)
+                if check_num and check_num not in check_nums_seen:
+                    check_nums_seen.add(check_num)
+                    transactions.append(check)
+                elif not check_num:
+                    # No check number, use traditional key
+                    transactions.append(check)
+
+            # Parse activity section (deposits, fees, etc.)
+            activity = self._parse_farmers_activity(cleaned_text, template)
+            for txn in activity:
+                # For deposits, allow true duplicates (different deposit slips with same amount/date)
+                # Use a count-based approach to allow legitimate duplicates
+                desc = txn['description'][:20]
+                if txn.get('is_deposit', False):
+                    key = (txn['date'], abs(txn['amount']), desc)
+                    deposit_counts[key] = deposit_counts.get(key, 0) + 1
+                    # Always add deposits - they may be legitimate duplicates
+                    transactions.append(txn)
+                else:
+                    # For non-deposits (fees, etc.), use standard dedup
+                    transactions.append(txn)
+
+            # Restore original year
+            self.statement_year = original_year
 
         return transactions
+
+    def _split_farmers_by_statement_period(self, text: str) -> List[Tuple[int, str]]:
+        """
+        Split Farmers Bank statement text by statement period and extract year for each.
+
+        Farmers Bank OCR output shows dates like:
+        - "CARNEGIE OK 73015 <garbage> 07/31 08/30/2024" (FROM DATE TO DATE)
+        - The second date (MM/DD/YYYY) is the statement end date with the year
+
+        Returns:
+            List of (year, page_text) tuples
+        """
+        # Find all "STATEMENT OF ACCOUNT" markers - these delineate different statements
+        statement_markers = list(re.finditer(r'STATEMENT\s+OF\s+ACCOUNT', text, re.IGNORECASE))
+
+        if self.debug:
+            print(f"[DEBUG] Found {len(statement_markers)} STATEMENT OF ACCOUNT markers", flush=True)
+
+        # Pattern to find statement date with full year (MM/DD/YYYY)
+        # This appears in header like: "07/31 08/30/2024" or "08/29 09/30/2025"
+        date_pair_pattern = r'(\d{1,2}/\d{1,2})\s+(\d{1,2}/\d{1,2})/(\d{4})'
+
+        if not statement_markers:
+            # No statement markers - process as single statement
+            # Find the first full date to get the year
+            year_match = re.search(r'(\d{1,2}/\d{1,2})/(\d{4})', text)
+            if year_match:
+                year = int(year_match.group(2))
+                return [(year, text)]
+            return [(self.statement_year, text)]
+
+        # Process each statement section
+        pages = []
+        processed_years = {}  # Track which years we've seen to avoid duplicates
+
+        for i, marker in enumerate(statement_markers):
+            # Get text from this marker to the next marker (or end)
+            start = marker.start()
+            if i + 1 < len(statement_markers):
+                end = statement_markers[i + 1].start()
+            else:
+                end = len(text)
+
+            page_text = text[start:end]
+
+            # Look for the statement date in the header area (first 600 chars of this section)
+            header_area = page_text[:600]
+
+            # Try to find date pair like "07/31 08/30/2024"
+            year_match = re.search(date_pair_pattern, header_area)
+            if year_match:
+                year = int(year_match.group(3))
+                if self.debug:
+                    print(f"[DEBUG] Statement period: {year_match.group(1)} to {year_match.group(2)}/{year_match.group(3)} -> year {year}", flush=True)
+            else:
+                # Fallback: look for any date with year
+                fallback = re.search(r'(\d{1,2}/\d{1,2})/(\d{4})', header_area)
+                if fallback:
+                    year = int(fallback.group(2))
+                    if self.debug:
+                        print(f"[DEBUG] Fallback date found: {fallback.group(0)} -> year {year}", flush=True)
+                else:
+                    year = self.statement_year
+                    if self.debug:
+                        print(f"[DEBUG] No date found, using default year {year}", flush=True)
+
+            # Check if we already have content for this year
+            # The OCR often produces duplicate pages, but we need to include pages
+            # with different statement periods (different months)
+
+            # Extract the FROM/TO dates to identify unique statement periods
+            period_match = re.search(r'(\d{1,2}/\d{1,2})\s+(\d{1,2}/\d{1,2})/\d{4}', page_text[:600])
+            period_key = f"{year}_{period_match.group(1)}_{period_match.group(2)}" if period_match else f"{year}_unknown_{i}"
+
+            if period_key in processed_years:
+                # True duplicate - same year AND same statement period
+                if self.debug:
+                    print(f"[DEBUG] Skipping duplicate page for period {period_key}", flush=True)
+            else:
+                # Check if this page has substantive content
+                has_checks = 'NUMBERED CHECKS' in page_text
+                has_deposits = re.search(r'\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+DEPOSIT', page_text)
+                has_service_fee = 'SERVICE FEE' in page_text.upper()
+
+                if has_checks or has_deposits or has_service_fee:
+                    pages.append((year, page_text))
+                    processed_years[period_key] = True
+                    if self.debug:
+                        content_types = []
+                        if has_checks: content_types.append('checks')
+                        if has_deposits: content_types.append('deposits')
+                        if has_service_fee: content_types.append('service fees')
+                        print(f"[DEBUG] Including page for period {period_key}: {', '.join(content_types)}", flush=True)
+                elif self.debug:
+                    print(f"[DEBUG] Skipping empty page for period {period_key}", flush=True)
+
+        return pages if pages else [(self.statement_year, text)]
 
     def _clean_farmers_text(self, text: str, template: Dict) -> str:
         """Remove non-transaction sections from Farmers Bank statements."""
@@ -1580,14 +1865,18 @@ class SmartParser:
         * Indicates skipped check number
         """
         checks = []
+        checks_found = set()  # Track check numbers to avoid duplicates
 
         # Find NUMBERED CHECKS section
         if 'NUMBERED CHECKS' not in text.upper():
+            # Try to extract from check images as fallback
+            checks = self._parse_farmers_check_images(text, template)
             return checks
 
-        # Extract section between NUMBERED CHECKS and DAILY BALANCE
+        # Extract section between NUMBERED CHECKS and next section
+        # Use more flexible end markers
         check_section = re.search(
-            r'NUMBERED CHECKS\s*\n(.+?)(?:DAILY BALANCE|HOW TO RECONCILE|\Z)',
+            r'NUMBERED CHECKS\s*\n(.+?)(?:DAILY BALANCE|HOW TO RECONCILE|STATEMENT OF ACCOUNT|SERVICE FEE|\Z)',
             text,
             re.DOTALL | re.IGNORECASE
         )
@@ -1597,49 +1886,183 @@ class SmartParser:
 
         section_text = check_section.group(1)
 
-        # Pattern: CheckNum(optional *) Date Amount
-        # Examples: "1480 07/16 7,225.40" or "1484*07/16 7,343.94"
-        pattern = r'(\d{4})\*?\s*(\d{1,2}/\d{1,2})\s+([0-9,]+\.\d{2})'
+        # Multiple patterns to catch different OCR formats
+        patterns = [
+            # Standard: CheckNum(optional *) Date Amount
+            r'(\d{4})\*?\s*(\d{1,2}/\d{1,2})\s+([0-9,]+\.\d{2})',
+            # With extra spacing: "1500   07/25   720.00"
+            r'(\d{4})\s+(\d{1,2}/\d{1,2})\s+([0-9,]+\.\d{2})',
+            # OCR may merge: "150007/25720.00" - capture with flexible spacing
+            r'(\d{4})\*?(\d{1,2}/\d{1,2})([0-9,]+\.\d{2})',
+        ]
 
-        matches = re.findall(pattern, section_text)
+        for pattern in patterns:
+            matches = re.findall(pattern, section_text)
 
-        if self.debug and matches:
-            print(f"[DEBUG] Found {len(matches)} checks in NUMBERED CHECKS section", flush=True)
+            for check_num, date_str, amount_str in matches:
+                if check_num in checks_found:
+                    continue  # Skip duplicates
 
-        for check_num, date_str, amount_str in matches:
-            try:
-                amount = float(amount_str.replace(',', ''))
-                date = self._format_date(date_str, 'MM/DD')
+                try:
+                    amount = float(amount_str.replace(',', ''))
+                    date = self._format_date(date_str, 'MM/DD')
 
-                if not date:
+                    if not date:
+                        continue
+
+                    # Skip very small amounts (likely OCR errors)
+                    if amount < 1.00:
+                        continue
+
+                    checks_found.add(check_num)
+                    checks.append({
+                        'date': date,
+                        'description': f'CHECK #{check_num}',
+                        'amount': -abs(amount),  # Checks are always withdrawals
+                        'is_deposit': False,
+                        'module': 'CD',
+                        'gl_code': '7300',  # Use 7300 for vendor payments
+                        'confidence_score': 90,
+                        'confidence_level': 'high',
+                        'parsed_by': 'farmers_checks',
+                        'check_number': check_num
+                    })
+
+                    if self.debug:
+                        print(f"[DEBUG] Farmers check: {date} #{check_num} ${amount:.2f}", flush=True)
+
+                except Exception as e:
+                    if self.debug:
+                        print(f"[DEBUG] Farmers check parse failed: {e}", flush=True)
                     continue
 
-                # Skip very small amounts (likely OCR errors)
+        if self.debug and checks:
+            print(f"[DEBUG] Found {len(checks)} checks in NUMBERED CHECKS section", flush=True)
+
+        # Also try to extract from check images as supplementary
+        image_checks = self._parse_farmers_check_images(text, template)
+        for img_check in image_checks:
+            check_num = img_check.get('check_number')
+            if check_num and check_num not in checks_found:
+                checks_found.add(check_num)
+                checks.append(img_check)
+                if self.debug:
+                    print(f"[DEBUG] Added check from image: #{check_num}", flush=True)
+
+        return checks
+
+    def _parse_farmers_check_images(self, text: str, template: Dict) -> List[Dict]:
+        """
+        Extract check information from check image pages.
+
+        Check images may contain: check number, date, amount
+        Look for patterns like: "#1500" or "1500" followed by "$720.00"
+
+        IMPORTANT: This function is disabled/minimized because it causes false positives.
+        The main check parsing should happen in _parse_farmers_numbered_checks.
+        Only use this as a last resort for checks clearly labeled in images.
+        """
+        checks = []
+
+        # Only look for explicitly labeled checks in images
+        # Pattern: "#1500" or "CHECK #1500" or "- #1500" followed by amount
+        # Must have a clear check indicator, not just a 4-digit number
+
+        # Look for check image annotations like: "07/24/25 - $720.00 - #1500"
+        # This is a common format in check image footers
+        check_annotation_pattern = r'(\d{1,2}/\d{1,2}/\d{2,4})\s*[-–]\s*\$?([0-9,]+\.\d{2})\s*[-–]\s*#(\d{4})'
+
+        matches = re.findall(check_annotation_pattern, text)
+        seen_check_nums = set()
+
+        for date_str, amount_str, check_num in matches:
+            # Skip years being parsed as check numbers (2020-2029)
+            if check_num.startswith('20') and 2020 <= int(check_num) <= 2029:
+                continue
+
+            if check_num in seen_check_nums:
+                continue
+
+            try:
+                amount = float(amount_str.replace(',', ''))
                 if amount < 1.00:
                     continue
 
+                # Format the date
+                date = self._format_date(date_str, 'MM/DD/YYYY' if '/' in date_str and len(date_str) > 5 else 'MM/DD')
+                if not date:
+                    continue
+
+                seen_check_nums.add(check_num)
                 checks.append({
                     'date': date,
                     'description': f'CHECK #{check_num}',
-                    'amount': -abs(amount),  # Checks are always withdrawals
+                    'amount': -abs(amount),
                     'is_deposit': False,
                     'module': 'CD',
-                    'gl_code': '2000',  # Default check GL
-                    'confidence_score': 90,
-                    'confidence_level': 'high',
-                    'parsed_by': 'farmers_checks',
+                    'gl_code': '7300',
+                    'confidence_score': 75,
+                    'confidence_level': 'medium',
+                    'parsed_by': 'farmers_check_image',
                     'check_number': check_num
                 })
 
                 if self.debug:
-                    print(f"[DEBUG] Farmers check: {date} #{check_num} ${amount:.2f}", flush=True)
+                    print(f"[DEBUG] Check from image annotation: #{check_num} ${amount:.2f} on {date}", flush=True)
 
             except Exception as e:
                 if self.debug:
-                    print(f"[DEBUG] Farmers check parse failed: {e}", flush=True)
+                    print(f"[DEBUG] Check image parse failed: {e}", flush=True)
                 continue
 
         return checks
+
+    def _extract_payee_from_check_image(self, text: str, check_number: str = None) -> str:
+        """
+        Extract payee/vendor name from check image OCR text.
+
+        Looks for patterns like:
+        - "Pay to the order of: [VENDOR NAME]"
+        - "PAY TO: [VENDOR NAME]"
+        - "TO: [VENDOR NAME] LLC"
+
+        Args:
+            text: OCR text from check image section
+            check_number: Optional check number to help locate the right section
+
+        Returns:
+            Extracted payee name or None
+        """
+        if not text:
+            return None
+
+        # Common patterns for payee extraction
+        patterns = [
+            # Standard "Pay to the order of" format
+            r'Pay\s+to\s+(?:the\s+)?order\s+of[:\s]+([A-Za-z0-9\s\.,&\'\-]+?)(?:\n|$|\*)',
+            # Simplified "PAY TO" format
+            r'PAY\s+TO[:\s]+([A-Za-z0-9\s\.,&\'\-]+?)(?:\n|$|\*)',
+            # Just "TO:" followed by a name with business suffix
+            r'\bTO[:\s]+([A-Za-z0-9\s\.,&\'\-]+?(?:LLC|Inc|Corp|Company|Co\.|Ltd))',
+            # Name followed by check number pattern
+            r'([A-Za-z][A-Za-z0-9\s\.,&\'\-]{5,50}?(?:LLC|Inc|Corp))\s*(?:CHECK|#)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                payee = match.group(1).strip()
+                # Clean up the payee name
+                payee = re.sub(r'\s+', ' ', payee)  # Normalize whitespace
+                payee = payee.strip('.,- ')  # Remove trailing punctuation
+
+                # Validate - should be at least 3 chars and not all numbers
+                if len(payee) >= 3 and not payee.replace(' ', '').isdigit():
+                    if self.debug:
+                        print(f"[DEBUG] Extracted payee from check image: {payee}", flush=True)
+                    return payee
+
+        return None
 
     def _parse_farmers_activity(self, text: str, template: Dict) -> List[Dict]:
         """
@@ -1689,17 +2112,22 @@ class SmartParser:
                     if any(kw.upper() in desc_upper for kw in deposit_kw):
                         module = 'CR'
                         is_deposit = True
-                        gl_code = '4100'  # Default deposit GL
+                        gl_code = '7900'  # Revenue GL for deposits
                     elif any(kw.upper() in desc_upper for kw in withdrawal_kw):
-                        module = 'JV' if 'FEE' in desc_upper else 'CD'
+                        # Service fees and bank charges are Cash Disbursements (CD)
+                        # with GL 6100 (Bank Charges expense account)
+                        module = 'CD'
                         is_deposit = False
-                        gl_code = '5060' if 'FEE' in desc_upper else '7300'
+                        if 'SERVICE FEE' in desc_upper or 'FEE' in desc_upper:
+                            gl_code = '6100'  # Bank Charges expense
+                        else:
+                            gl_code = '7300'  # Vendor Payments
                         amount = -abs(amount)
                     else:
                         # Default to deposit if positive keyword match fails
                         module = 'CR'
                         is_deposit = True
-                        gl_code = '4100'
+                        gl_code = '7900'
 
                     transactions.append({
                         'date': date,
@@ -2651,12 +3079,22 @@ class SmartParser:
         deposits = [t for t in transactions if t.get('amount', 0) > 0]
         withdrawals = [t for t in transactions if t.get('amount', 0) < 0]
 
+        # Calculate statement period from transactions if not extracted from header
+        if not self._statement_period_start and transactions:
+            sorted_txns = sorted(transactions, key=lambda t: t.get('date', ''))
+            if sorted_txns:
+                self._statement_period_start = sorted_txns[0].get('date')
+                self._statement_period_end = sorted_txns[-1].get('date')
+
         self.parsing_metadata = {
             'bank_name': self.bank_name,
             'parsing_method': self.parsing_method,
             'template_used': self.bank_template is not None,
             'ocr_used': self._ocr_used,
             'statement_year': self.statement_year,
+            'statement_period_start': self._statement_period_start,
+            'statement_period_end': self._statement_period_end,
+            'statement_period': f"{self._statement_period_start or 'N/A'} - {self._statement_period_end or 'N/A'}",
             'total_transactions': len(transactions),
             'deposit_count': len(deposits),
             'withdrawal_count': len(withdrawals),

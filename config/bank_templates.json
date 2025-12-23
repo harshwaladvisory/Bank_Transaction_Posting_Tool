@@ -70,8 +70,8 @@
       "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+([\\d,]+\\.\\d{2})\\s+(.+)",
       "date_format": "MM/DD",
       "summary_patterns": {
-        "total_deposits": "(?:ACH Additions|Deposits and Other Additions)\\s+\\d+\\s+([\\d,]+\\.\\d{2})",
-        "total_withdrawals": "(?:ACH Deductions|Checks and Other Deductions)\\s+\\d+\\s+([\\d,]+\\.\\d{2})"
+        "total_deposits": "Total\\s+\\d+\\s+([\\d,]+\\.\\d{2})\\s*\\|",
+        "total_withdrawals": "\\|\\s*Total\\s+\\d+\\s+([\\d,]+\\.\\d{2})"
       },
       "deposit_keywords": ["DEPOSIT", "INTEREST", "CREDIT", "HUD", "TREAS"],
       "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYROLL"]
@@ -280,8 +280,9 @@
       "IRS": {"gl": "6700", "fund": "General", "confidence": "high"},
       "EFTPS": {"gl": "6700", "fund": "General", "confidence": "high"},
       "TAX": {"gl": "6700", "fund": "General", "confidence": "medium"},
-      "FEE": {"gl": "5060", "fund": "General", "confidence": "high"},
-      "SERVICE CHARGE": {"gl": "5060", "fund": "General", "confidence": "high"},
+      "FEE": {"gl": "6100", "fund": "General", "confidence": "high"},
+      "SERVICE CHARGE": {"gl": "6100", "fund": "General", "confidence": "high"},
+      "SERVICE FEE": {"gl": "6100", "fund": "General", "confidence": "high"},
       "CHECK": {"gl": "2000", "fund": "General", "confidence": "low"},
       "GFL": {"gl": "5950", "fund": "Indirect", "confidence": "high"},
       "WASTE": {"gl": "5950", "fund": "Indirect", "confidence": "high"},
