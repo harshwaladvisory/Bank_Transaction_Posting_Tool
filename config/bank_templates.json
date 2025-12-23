@@ -13,7 +13,7 @@
   },
   "banks": {
     "CrossFirst": {
-      "identifiers": ["CrossFirst", "Cross First", "IntraFi Cash Service", "IntraFi Network"],
+      "identifiers": ["CrossFirst", "Cross First", "IntraFi Cash Service", "IntraFi Network", "CROSSFIRST BANK", "crossfirstbank.com"],
       "requires_ocr": true,
       "transaction_patterns": [
         {
@@ -54,7 +54,7 @@
       }
     },
     "PNC": {
-      "identifiers": ["PNC Bank", "PNC", "pnc.com", "Non-Profit Checking"],
+      "identifiers": ["PNC Bank", "PNC", "pnc.com", "Non-Profit Checking", "PERFORMANCE SELECT CHECKING", "PNC FINANCIAL"],
       "requires_ocr": true,
       "sections": {
         "deposits": {
@@ -77,7 +77,7 @@
       "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE", "PAYROLL"]
     },
     "Sovereign": {
-      "identifiers": ["Sovereign Bank", "Sovereign", "banksovereign.com", "BUSINESS INTEREST"],
+      "identifiers": ["Sovereign Bank", "Sovereign", "banksovereign.com", "BUSINESS INTEREST", "SOVEREIGN BANK", "Statement Ending", "Credit(s) This Period"],
       "requires_ocr": true,
       "transaction_patterns": [
         {
@@ -97,7 +97,7 @@
       "skip_patterns": ["Beginning Balance", "Ending Balance", "Interest Earned From"]
     },
     "Truist": {
-      "identifiers": ["TRUIST", "Truist Bank", "truist.com", "SunTrust", "BB&T"],
+      "identifiers": ["TRUIST", "Truist Bank", "truist.com", "SunTrust", "BB&T", "TRUIST COMMUNITY CHECKING", "4TRUIST", "Your previous balance as of", "Your new balance as of"],
       "requires_ocr": true,
       "sections": {
         "deposits": {
@@ -215,7 +215,7 @@
       "withdrawal_keywords": ["CHECK", "DEBIT", "WITHDRAWAL", "FEE"]
     },
     "Farmers": {
-      "identifiers": ["FARMERS BANK", "Farmers Bank", "farmersbankok.com", "Carnegie, OK 73015", "NUMBERED CHECKS"],
+      "identifiers": ["FARMERS BANK", "Farmers Bank", "farmersbankok.com", "Carnegie, OK 73015", "NUMBERED CHECKS", "P.O. BOX 68 31 WEST MAIN STREET CARNEGIE", "farmersbankok", "EST. 1905"],
       "requires_ocr": true,
       "custom_parser": "farmers",
       "sections": {

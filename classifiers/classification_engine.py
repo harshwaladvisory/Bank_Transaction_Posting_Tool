@@ -203,22 +203,41 @@ class ClassificationEngine:
 
         # 1.5. High-confidence bank-generated transaction detection
         # These transactions are unambiguous - they come directly from the bank
-        HIGH_CONFIDENCE_BANK_KEYWORDS = {
-            'interest': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
-            'interest credit': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
-            'interest earned': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
-            'interest paid': {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'},
-            'service fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Fee'},
-            'service charge': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Charge'},
-            'monthly fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Monthly Fee'},
-            'maintenance fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Maintenance Fee'},
-            'nsf fee': {'module': 'CD', 'gl_code': '6100', 'category': 'NSF Fee'},
-            'overdraft fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Overdraft Fee'},
-            'wire transfer fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Transfer Fee'},
-            'wire fee': {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Fee'},
-        }
+        # Order matters - more specific matches first, then general matches
+        HIGH_CONFIDENCE_BANK_KEYWORDS = [
+            # Interest Income - must be checked carefully to avoid matching "interest expense"
+            ('interest credit', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
+            ('interest earned', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
+            ('interest paid', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
+            ('interest income', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
+            # Bank Service Fees
+            ('service fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Fee'}),
+            ('service charge', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Charge'}),
+            ('monthly fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Monthly Fee'}),
+            ('maintenance fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Maintenance Fee'}),
+            ('nsf fee', {'module': 'CD', 'gl_code': '6100', 'category': 'NSF Fee'}),
+            ('overdraft fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Overdraft Fee'}),
+            ('wire transfer fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Transfer Fee'}),
+            ('wire fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Fee'}),
+        ]
 
-        for keyword, info in HIGH_CONFIDENCE_BANK_KEYWORDS.items():
+        # Check for exact "INTEREST" match first (common bank transaction)
+        # This handles cases where description is just "INTEREST" without any other qualifiers
+        if desc_lower.strip() == 'interest' or desc_lower.startswith('interest ') or ' interest' in desc_lower:
+            # Make sure it's not "interest expense" or "interest charge" (which are expenses)
+            if 'expense' not in desc_lower and 'charge' not in desc_lower:
+                bank_txn_result = {
+                    'module': 'CR',
+                    'confidence': 0.98,  # Very high confidence for INTEREST
+                    'classifier': 'bank_transaction',
+                    'priority': 0,  # Highest priority
+                    'gl_code': '4600',
+                    'category': 'Interest Income'
+                }
+                results['classifications'].append(bank_txn_result)
+
+        # Now check other high-confidence keywords
+        for keyword, info in HIGH_CONFIDENCE_BANK_KEYWORDS:
             if keyword in desc_lower:
                 bank_txn_result = {
                     'module': info['module'],

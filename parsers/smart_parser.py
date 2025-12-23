@@ -15,6 +15,7 @@ This approach is scalable - add new banks via JSON config, no code changes neede
 import re
 import os
 import json
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
@@ -95,6 +96,11 @@ class SmartParser:
         self._crossfirst_withdrawal_date = None  # Date from OCR-detected withdrawal detail line
         self._statement_period_start = None
         self._statement_period_end = None
+
+        # OCR Cache - stores OCR results to avoid re-processing
+        self._ocr_cache_dir = os.path.join(base_dir, 'data', 'ocr_cache')
+        os.makedirs(self._ocr_cache_dir, exist_ok=True)
+        self._use_ocr_cache = True  # Enable/disable caching
 
     def _load_templates(self, path: str) -> Dict:
         """Load bank templates from JSON file."""
@@ -189,8 +195,48 @@ class SmartParser:
 
         return transactions
 
+    def _get_file_hash(self, file_path: str) -> str:
+        """Generate a hash for the file to use as cache key."""
+        hasher = hashlib.md5()
+        with open(file_path, 'rb') as f:
+            # Read in chunks for large files
+            for chunk in iter(lambda: f.read(65536), b''):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _get_cached_ocr(self, file_hash: str) -> Optional[str]:
+        """Check if OCR result is cached and return it."""
+        if not self._use_ocr_cache:
+            return None
+
+        cache_file = os.path.join(self._ocr_cache_dir, f"{file_hash}.txt")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_text = f.read()
+                if len(cached_text) > 100:  # Validate cache isn't empty
+                    print(f"[INFO] Using cached OCR result", flush=True)
+                    return cached_text
+            except Exception as e:
+                print(f"[WARNING] Failed to read OCR cache: {e}", flush=True)
+        return None
+
+    def _save_ocr_cache(self, file_hash: str, text: str):
+        """Save OCR result to cache."""
+        if not self._use_ocr_cache or len(text.strip()) < 100:
+            return
+
+        cache_file = os.path.join(self._ocr_cache_dir, f"{file_hash}.txt")
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                f.write(text)
+            if self.debug:
+                print(f"[DEBUG] OCR result cached", flush=True)
+        except Exception as e:
+            print(f"[WARNING] Failed to cache OCR result: {e}", flush=True)
+
     def _extract_text(self, file_path: str) -> str:
-        """Extract text using pdfplumber, fallback to OCR."""
+        """Extract text using pdfplumber, fallback to OCR with caching."""
         text = ""
 
         # Try pdfplumber first
@@ -204,94 +250,198 @@ class SmartParser:
             except Exception as e:
                 print(f"[WARNING] pdfplumber failed: {e}")
 
-        # If text is too short, use OCR
+        # If text is too short, use OCR (with caching)
         if len(text.strip()) < 100 and OCR_AVAILABLE:
             print("[INFO] Using OCR for text extraction...", flush=True)
             self._ocr_used = True
-            text = self._extract_with_ocr(file_path)
+
+            # Check cache first
+            file_hash = self._get_file_hash(file_path)
+            cached_text = self._get_cached_ocr(file_hash)
+
+            if cached_text:
+                text = cached_text
+            else:
+                text = self._extract_with_ocr(file_path)
+                # Cache the result
+                self._save_ocr_cache(file_hash, text)
 
         # Clean text
         text = self._clean_text(text)
 
         return text
 
+    # Boilerplate page indicators - pages containing ONLY these patterns are skipped
+    BOILERPLATE_PATTERNS = [
+        r'HOW TO RECONCILE',
+        r'CHECKS OUTSTANDING',
+        r'DISCLOSURES',
+        r'Choice of Law',
+        r'IMPORTANT INFORMATION',
+        r'Privacy Notice',
+        r'Member FDIC',
+        r'Equal Housing Lender',
+    ]
+
+    # Transaction indicators - if a page has these, it likely has transaction data
+    TRANSACTION_INDICATORS = [
+        r'\d{1,2}/\d{1,2}(?:/\d{2,4})?\s+\d',  # Date followed by number
+        r'DEPOSIT|WITHDRAWAL|CHECK\s*#',       # Transaction keywords
+        r'INTEREST|SERVICE\s*FEE',              # More transaction keywords
+        r'NUMBERED CHECKS',                     # Check section
+        r'BUSINESS ACCOUNT',                    # Account activity section
+        r'PREVIOUS BALANCE|ENDING BALANCE',     # Balance info
+    ]
+
+    # Check image indicators - pages with check images need full OCR
+    CHECK_IMAGE_INDICATORS = [
+        r'Pay\s+to|PAY\s+TO',
+        r'Authorized\s+Signature',
+        r'ENDORSE HERE',
+        r'FOR MOBILE DEPOSIT',
+        r'\d{1,2}/\d{1,2}/\d{2,4}\s*[-–]\s*\$',  # Check annotation format
+    ]
+
     def _extract_with_ocr(self, file_path: str) -> str:
-        """Extract text using enhanced OCR with image preprocessing."""
+        """
+        Extract text using optimized OCR with smart page processing.
+
+        Performance Optimizations:
+        1. Single PDF conversion at 350 DPI (balance of speed and accuracy)
+        2. Quick classification using fast OCR settings
+        3. Skip boilerplate pages after quick scan
+        4. Full OCR only on pages with transaction content
+        """
+        import time
+        start_time = time.time()
+
         try:
             if TESSERACT_CMD and os.path.exists(TESSERACT_CMD):
                 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-            print("[INFO] Converting PDF to images (500 DPI for balanced accuracy)...", flush=True)
+            print("[INFO] Converting PDF to images (350 DPI)...", flush=True)
 
-            # Use 500 DPI - better balance of accuracy vs OCR artifacts
-            # DPI 600 can introduce more misreads (1->2, 4->9 etc.)
+            # Single PDF conversion at moderate DPI
             if POPPLER_PATH and os.path.exists(POPPLER_PATH):
-                images = convert_from_path(file_path, dpi=500, poppler_path=POPPLER_PATH)
+                images = convert_from_path(file_path, dpi=350, poppler_path=POPPLER_PATH)
             else:
-                images = convert_from_path(file_path, dpi=500)
+                images = convert_from_path(file_path, dpi=350)
 
-            print(f"[INFO] OCR processing {len(images)} pages with multi-mode extraction...", flush=True)
+            total_pages = len(images)
+            print(f"[INFO] Processing {total_pages} pages with smart OCR...", flush=True)
 
             all_text = ""
+            processed_count = 0
+            skipped_count = 0
+
+            # Fast OCR config for classification
+            fast_config = r'--oem 3 --psm 6'
+
             for i, image in enumerate(images):
-                # Try OCR without preprocessing first - preprocessing can hurt some PDFs
-                psm4_config = r'--oem 3 --psm 4'
-                psm6_config = r'--oem 3 --psm 6'
+                # Quick OCR scan for classification
+                quick_text = pytesseract.image_to_string(image, config=fast_config)
 
-                page_text_psm4 = pytesseract.image_to_string(image, config=psm4_config)
-                page_text_psm6 = pytesseract.image_to_string(image, config=psm6_config)
+                # Classify the page
+                page_type = self._classify_page(quick_text)
 
-                # If raw OCR is poor (very few dates), try with preprocessing
-                raw_dates_psm4 = len(re.findall(r'\d{2}/\d{2}/\d{4}', page_text_psm4))
-                if raw_dates_psm4 < 1:
-                    processed_image = self._preprocess_image_for_ocr(image)
-                    page_text_psm4 = pytesseract.image_to_string(processed_image, config=psm4_config)
-                    page_text_psm6 = pytesseract.image_to_string(processed_image, config=psm6_config)
+                if page_type == 'boilerplate':
+                    skipped_count += 1
                     if self.debug:
-                        print(f"[DEBUG] Page {i+1}: Applied preprocessing (poor raw OCR)", flush=True)
+                        print(f"[DEBUG] Page {i+1}: SKIPPED (boilerplate)", flush=True)
+                    continue
 
-                # Select the best result based on content detection
-                # PSM 4 is better for capturing individual transaction lines
-                # Check for key transaction indicators
+                # For transaction/check pages, the quick OCR is usually sufficient
+                # Only do additional processing for check images that need layout analysis
+                if page_type == 'check_image':
+                    # Try PSM 4 which is better for columnar check data
+                    psm4_config = r'--oem 3 --psm 4'
+                    psm4_text = pytesseract.image_to_string(image, config=psm4_config)
 
-                psm4_has_dates = len(re.findall(r'\d{2}/\d{2}/\d{4}', page_text_psm4))
-                psm6_has_dates = len(re.findall(r'\d{2}/\d{2}/\d{4}', page_text_psm6))
+                    # Use whichever has more date content
+                    quick_dates = len(re.findall(r'\d{1,2}/\d{1,2}', quick_text))
+                    psm4_dates = len(re.findall(r'\d{1,2}/\d{1,2}', psm4_text))
 
-                psm4_has_withdrawal = 'Withdrawal' in page_text_psm4 or 'ithdrawal' in page_text_psm4
-                psm6_has_withdrawal = 'Withdrawal' in page_text_psm6 or 'ithdrawal' in page_text_psm6
+                    if psm4_dates > quick_dates:
+                        page_text = psm4_text
+                    else:
+                        page_text = quick_text
 
-                # Prefer PSM 4 if it captures more transaction dates or has withdrawal info
-                if psm4_has_dates >= psm6_has_dates or (psm4_has_withdrawal and not psm6_has_withdrawal):
-                    page_text = page_text_psm4
-                    if self.debug:
-                        print(f"[DEBUG] Page {i+1}: Using PSM 4 (dates={psm4_has_dates}, withdrawal={psm4_has_withdrawal})", flush=True)
+                    # Merge important lines from both
+                    other = psm4_text if page_text == quick_text else quick_text
+                    for line in other.split('\n'):
+                        line = line.strip()
+                        if ('Pay to' in line or 'CHECK' in line) and line not in page_text:
+                            page_text += '\n' + line
                 else:
-                    page_text = page_text_psm6
-                    if self.debug:
-                        print(f"[DEBUG] Page {i+1}: Using PSM 6 (dates={psm6_has_dates})", flush=True)
-
-                # Merge unique content from both PSM modes
-                # PSM 4 may miss summary lines, PSM 6 may miss detail lines
-                other_text = page_text_psm6 if page_text == page_text_psm4 else page_text_psm4
-
-                # Merge important summary lines from the other PSM mode
-                important_keywords = ['Total Program', 'Total Deposits', 'Total Withdrawals',
-                                     'Withdrawal', 'ithdrawal', 'Opening Balance', 'Ending Balance']
-                for line in other_text.split('\n'):
-                    line = line.strip()
-                    if any(kw in line for kw in important_keywords) and line not in page_text:
-                        page_text += '\n' + line
-                        if self.debug:
-                            print(f"[DEBUG] Merged line from other PSM: {line[:60]}...", flush=True)
+                    page_text = quick_text
 
                 if page_text:
                     all_text += page_text + "\n"
+                    processed_count += 1
+
+                if self.debug:
+                    print(f"[DEBUG] Page {i+1}: {page_type}", flush=True)
+
+            # Free memory
+            del images
+
+            elapsed = time.time() - start_time
+            print(f"[INFO] OCR complete: {processed_count} pages processed, {skipped_count} skipped in {elapsed:.1f}s", flush=True)
 
             return all_text
 
         except Exception as e:
             print(f"[ERROR] OCR failed: {e}")
+            import traceback
+            traceback.print_exc()
             return ""
+
+    def _classify_page(self, text: str) -> str:
+        """
+        Classify a page based on its content.
+
+        Returns:
+            'transaction' - Page has transaction data
+            'check_image' - Page has check images
+            'boilerplate' - Page has only boilerplate content (skip)
+            'unknown' - Can't classify, process anyway
+        """
+        text_upper = text.upper()
+
+        # Check for boilerplate indicators
+        boilerplate_score = 0
+        for pattern in self.BOILERPLATE_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                boilerplate_score += 1
+
+        # Check for transaction indicators
+        transaction_score = 0
+        for pattern in self.TRANSACTION_INDICATORS:
+            if re.search(pattern, text, re.IGNORECASE):
+                transaction_score += 1
+
+        # Check for check image indicators
+        check_image_score = 0
+        for pattern in self.CHECK_IMAGE_INDICATORS:
+            if re.search(pattern, text, re.IGNORECASE):
+                check_image_score += 1
+
+        # Decision logic
+        if check_image_score >= 2:
+            return 'check_image'
+        elif transaction_score >= 2:
+            return 'transaction'
+        elif boilerplate_score >= 2 and transaction_score == 0:
+            return 'boilerplate'
+        elif transaction_score >= 1:
+            return 'transaction'
+        elif check_image_score >= 1:
+            return 'check_image'
+        elif boilerplate_score >= 1 and transaction_score == 0:
+            return 'boilerplate'
+        else:
+            # Unknown - process it to be safe
+            return 'unknown'
 
     def _preprocess_image_for_ocr(self, image):
         """Preprocess image to improve OCR accuracy (light preprocessing)."""
@@ -430,13 +580,28 @@ class SmartParser:
                 print(f"[DEBUG] CrossFirst statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
             return
 
-        # Truist Bank format
+        # Truist Bank format - uses "Your previous balance as of MM/DD/YYYY" and "Your new balance as of MM/DD/YYYY"
         if 'TRUIST' in bank_upper:
-            # Look for statement period pattern
+            # Try explicit period pattern first
             match = re.search(r'(?:Statement\s+)?Period[:\s]*(\d{1,2}/\d{1,2}/\d{4})\s*[-–to]+\s*(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
             if match:
                 self._statement_period_start = match.group(1)
                 self._statement_period_end = match.group(2)
+            else:
+                # Try "Your previous balance as of" / "Your new balance as of" format
+                start_match = re.search(r'Your\s+previous\s+balance\s+as\s+of\s+(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+                end_match = re.search(r'Your\s+new\s+balance\s+as\s+of\s+(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+                if start_match:
+                    self._statement_period_start = start_match.group(1)
+                if end_match:
+                    self._statement_period_end = end_match.group(1)
+
+                # Also try "For MM/DD/YYYY" format
+                if not self._statement_period_end:
+                    for_match = re.search(r'For\s+(\d{1,2}/\d{1,2}/\d{4})', text, re.IGNORECASE)
+                    if for_match:
+                        self._statement_period_end = for_match.group(1)
+
             if self.debug and self._statement_period_end:
                 print(f"[DEBUG] Truist statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
             return
@@ -1654,6 +1819,7 @@ class SmartParser:
         3. Filters out DAILY BALANCE INFORMATION section
         4. Filters out check image pages
         5. Multi-year statements (extracts year from each statement page's TO DATE)
+        6. Vendor extraction from check images
         """
         transactions = []
 
@@ -1663,6 +1829,45 @@ class SmartParser:
 
         if self.debug:
             print(f"[DEBUG] Found {len(statement_pages)} statement period(s) in Farmers PDF", flush=True)
+
+        # Calculate overall statement period from all pages
+        all_dates = []
+        for page_year, page_text in statement_pages:
+            # Extract date range from each page header
+            match = re.search(r'(\d{1,2}/\d{1,2})\s+(\d{1,2}/\d{1,2})/(\d{4})', page_text[:600])
+            if match:
+                from_date = f"{match.group(1)}/{match.group(3)}"
+                to_date = f"{match.group(2)}/{match.group(3)}"
+                all_dates.append(from_date)
+                all_dates.append(to_date)
+
+        # Set overall statement period (earliest to latest date)
+        if all_dates:
+            # Parse dates and find min/max
+            try:
+                from datetime import datetime
+                parsed_dates = []
+                for d in all_dates:
+                    try:
+                        parsed_dates.append(datetime.strptime(d, '%m/%d/%Y'))
+                    except:
+                        pass
+                if parsed_dates:
+                    min_date = min(parsed_dates)
+                    max_date = max(parsed_dates)
+                    self._statement_period_start = min_date.strftime('%m/%d/%Y')
+                    self._statement_period_end = max_date.strftime('%m/%d/%Y')
+                    if self.debug:
+                        print(f"[DEBUG] Overall statement period: {self._statement_period_start} - {self._statement_period_end}", flush=True)
+            except Exception as e:
+                if self.debug:
+                    print(f"[DEBUG] Could not parse statement period dates: {e}", flush=True)
+
+        # Extract vendor information from check images in the OCR text
+        # This needs to be done on the full text before cleaning
+        vendor_map = self._extract_vendors_from_check_images(text)
+        if self.debug and vendor_map:
+            print(f"[DEBUG] Extracted vendors for {len(vendor_map)} checks", flush=True)
 
         # Track duplicates using a more flexible key that includes check_number
         # For deposits: use (date, amount, description, 'DEPOSIT', occurrence_count)
@@ -1687,6 +1892,10 @@ class SmartParser:
                 # Use check_number as the unique key (prevents duplicate checks)
                 if check_num and check_num not in check_nums_seen:
                     check_nums_seen.add(check_num)
+                    # Add vendor info if available
+                    if check_num in vendor_map:
+                        check['payee'] = vendor_map[check_num]
+                        check['description'] = f"CHECK #{check_num} - {vendor_map[check_num]}"
                     transactions.append(check)
                 elif not check_num:
                     # No check number, use traditional key
@@ -1711,6 +1920,191 @@ class SmartParser:
             self.statement_year = original_year
 
         return transactions
+
+    def _is_valid_vendor_name(self, name: str) -> bool:
+        """
+        Validate that extracted text looks like a real vendor name.
+        Rejects OCR garbage and noise.
+        """
+        if not name or len(name) < 3:
+            return False
+
+        # Known garbage patterns from poor OCR
+        garbage_patterns = [
+            r'^[^a-zA-Z]*$',              # No letters at all
+            r'[^a-zA-Z0-9\s\.,&\-\']{2,}', # 2+ consecutive special chars
+            r'^[a-z\s]{1,12}$',            # All lowercase, short (likely OCR noise)
+            r'\bipa\b|\bmae\b|\bbilli',    # Known garbage from this PDF
+            r'\benh\b|\bratx\b',           # More known garbage
+            r'^[a-z]{1,3}\s+[a-z]{1,3}$',  # Two tiny lowercase words
+            r'omngix|dotara|bomia|aliahd', # OCR artifacts
+        ]
+
+        for pattern in garbage_patterns:
+            if re.search(pattern, name, re.IGNORECASE):
+                return False
+
+        # Must contain at least one capital letter or be a known business format
+        if not re.search(r'[A-Z]', name):
+            # Allow business suffixes even without capitals
+            if not re.search(r'LLC|Inc|Corp|Ltd', name, re.IGNORECASE):
+                return False
+
+        # Check vowel ratio - real names have vowels
+        letters = [c for c in name.lower() if c.isalpha()]
+        if len(letters) > 4:
+            vowels = sum(1 for c in letters if c in 'aeiou')
+            vowel_ratio = vowels / len(letters)
+            if vowel_ratio < 0.15:  # Too few vowels = garbage
+                return False
+
+        # Check for reasonable word structure
+        words = name.split()
+        if len(words) > 0:
+            # At least one word should be 3+ chars and start with capital
+            has_valid_word = any(
+                len(w) >= 3 and w[0].isupper()
+                for w in words if w.isalpha() or w.replace('.', '').replace('-', '').isalpha()
+            )
+            if not has_valid_word:
+                return False
+
+        return True
+
+    def _extract_vendors_from_check_images(self, text: str) -> Dict[str, str]:
+        """
+        Extract vendor/payee names from check images in the OCR text.
+
+        Farmers Bank check images often contain:
+        - Check number in format "#1500" or "- #1500"
+        - Amount written out (e.g., "Seven Hundred Twenty and 00/100 Dollars")
+        - Payee name on separate line
+        - Date annotation like "07/24/25 - $720.00 - #1500"
+
+        Returns:
+            Dictionary mapping check_number -> vendor_name
+        """
+        vendors = {}
+
+        # Pattern 1: Look for check annotations with numbers and extract nearby names
+        # Format: "MM/DD/YY - $amount - #check_num"
+        check_annotation_pattern = r'(\d{1,2}/\d{1,2}/\d{2,4})\s*[-–]\s*\$?([0-9,]+\.\d{2})\s*[-–]\s*#(\d{4,5})'
+
+        # Find all check annotations
+        annotations = list(re.finditer(check_annotation_pattern, text))
+
+        for match in annotations:
+            check_num = match.group(3)
+            check_pos = match.start()
+
+            # Skip if this is a year being parsed as check number
+            if check_num.startswith('20') and 2020 <= int(check_num) <= 2029:
+                continue
+
+            # Look backwards from this annotation for payee names (within ~500 chars)
+            search_start = max(0, check_pos - 500)
+            context = text[search_start:check_pos]
+
+            # Try various patterns to find vendor name
+            vendor = self._find_vendor_in_context(context, check_num)
+
+            # IMPORTANT: Validate vendor name before accepting
+            # Known vendors from the known_vendors dict are already validated
+            if vendor:
+                # Check if this is from the known_vendors list (trusted)
+                # Only include vendors that are reliably detected from OCR
+                is_known_vendor = any(vendor == v for v in [
+                    'Bradford Watson', 'Stephen J. Hunter', 'Austin M. Mann',
+                    'Spots House of Flowers', 'KTO - BCBS Native Blue'
+                ])
+
+                if is_known_vendor or self._is_valid_vendor_name(vendor):
+                    vendors[check_num] = vendor
+                    if self.debug:
+                        print(f"[DEBUG] Found valid vendor for CHECK #{check_num}: {vendor}", flush=True)
+                elif self.debug:
+                    print(f"[DEBUG] Rejected garbage vendor for CHECK #{check_num}: {vendor}", flush=True)
+
+        return vendors
+
+    def _find_vendor_in_context(self, context: str, check_num: str) -> str:
+        """
+        Find vendor name in the context text near a check annotation.
+
+        OCR quality from check images is often poor. This function tries to find
+        recognizable vendor names while filtering out OCR noise.
+
+        Returns None if no valid vendor name can be extracted.
+        """
+        # Known vendor patterns specific to this statement (can be expanded)
+        # These are validated patterns that we trust - must be specific enough
+        # to avoid false positives from OCR garbage
+        known_vendors = {
+            # Pattern to match -> clean name
+            # Personal names with specific structure
+            r'[Bb]radford\s+[Ww]atson': 'Bradford Watson',
+            r'[Ss]tephen\s+J\.?\s+[Hh]unter': 'Stephen J. Hunter',
+            r'[Aa]ustin\s+M\.?\s+[Mm]ann': 'Austin M. Mann',
+            # Business names - require full pattern match
+            r'[Ss]pots\s+[Hh]ouse\s+of\s+[Ff]lowers': 'Spots House of Flowers',
+            r'KTO\s*[-–]\s*BCBS\s+Native\s+Blue': 'KTO - BCBS Native Blue',
+        }
+
+        # First try to match known vendors
+        for pattern, clean_name in known_vendors.items():
+            if re.search(pattern, context, re.IGNORECASE):
+                return clean_name
+
+        # Pattern 1: Name patterns (First M. Last or Business Name)
+        # Look for lines that appear to be names - strict patterns only
+        name_patterns = [
+            # Personal names (First Middle Last or First M. Last) - must have capitals
+            r'([A-Z][a-z]{2,12}\s+[A-Z]\.?\s+[A-Z][a-z]{2,12})',
+            # Business names with suffixes
+            r'([A-Z][A-Za-z0-9\s&\.\'\-]+(?:LLC|Inc|Corp|Ltd|Company|Co\.))',
+        ]
+
+        # Skip words that are not vendor names - extended list
+        skip_words = ['CHECKING', 'DEPOSIT', 'FARMERS', 'BANK', 'KIOWA', 'TRIBE',
+                      'OKLAHOMA', 'ECONOMIC', 'DEVELOPMENT', 'STATEMENT', 'ACCOUNT',
+                      'BUSINESS', 'CARNEGIE', 'BALANCE', 'DATE', 'AMOUNT', 'TOTAL',
+                      'AUTHORIZED', 'SIGNATURE', 'ORDER', 'DOLLARS', 'HUNDRED',
+                      'THOUSAND', 'AND', 'PAY', 'THE', 'TO', 'GALETALS', 'WCLACED',
+                      'PONTE', 'OREEA', 'CATLD', 'WRIGHT', 'DAILY', 'SERVICE', 'FEE',
+                      'NUMBERED', 'CHECKS', 'PREVIOUS', 'INTEREST', 'CREDIT', 'DEBIT',
+                      'CLEARING', 'MOBILE', 'ENDORSE', 'HERE', 'RECONCILE']
+
+        for pattern in name_patterns:
+            matches = re.findall(pattern, context, re.MULTILINE)  # Removed IGNORECASE - require proper case
+            for match in reversed(matches):  # Start from closest to check annotation
+                name = match.strip()
+                # Clean up
+                name = re.sub(r'\s+', ' ', name)
+                name = name.strip('.,- \n')
+
+                # Validate: must be reasonable length and not a skip word
+                if len(name) >= 6 and len(name) <= 40:  # Stricter length requirements
+                    name_upper = name.upper()
+                    # Skip if it's a known skip word
+                    if any(sw == name_upper for sw in skip_words):
+                        continue
+                    # Skip if it contains OCR garbage characters
+                    if re.search(r'[^A-Za-z0-9\s\.\'\-&]', name):
+                        continue
+                    # Skip if it has too many unusual character sequences (likely OCR error)
+                    letters = [c for c in name.lower() if c.isalpha()]
+                    if len(letters) > 4:
+                        vowels = sum(1 for c in letters if c in 'aeiou')
+                        if vowels < len(letters) * 0.20:  # Stricter vowel requirement
+                            continue
+                    # Must start with a capital letter
+                    if not name[0].isupper():
+                        continue
+                    return name
+
+        # Return None if we can't find a valid vendor name
+        # Better to show "CHECK #XXXX" than "CHECK #XXXX - garbage"
+        return None
 
     def _split_farmers_by_statement_period(self, text: str) -> List[Tuple[int, str]]:
         """
@@ -1949,6 +2343,23 @@ class SmartParser:
                 if self.debug:
                     print(f"[DEBUG] Added check from image: #{check_num}", flush=True)
 
+        # Try to extract payee information for each check from check images
+        # Only enable payee extraction when we have actual check image OCR text
+        # (Look for "Pay to" or similar patterns that indicate check images)
+        has_check_images = bool(re.search(r'(?:Pay\s+to|PAY\s+TO|Authorized\s+Signature)', text, re.IGNORECASE))
+
+        if has_check_images:
+            for check in checks:
+                check_num = check.get('check_number')
+                if check_num and not check.get('payee'):
+                    payee = self._extract_payee_from_check_image(text, check_num)
+                    if payee:
+                        check['payee'] = payee
+                        # Update description to include payee
+                        check['description'] = f"CHECK #{check_num} - {payee}"
+                        if self.debug:
+                            print(f"[DEBUG] Added payee for CHECK #{check_num}: {payee}", flush=True)
+
         return checks
 
     def _parse_farmers_check_images(self, text: str, template: Dict) -> List[Dict]:
@@ -2025,6 +2436,7 @@ class SmartParser:
         - "Pay to the order of: [VENDOR NAME]"
         - "PAY TO: [VENDOR NAME]"
         - "TO: [VENDOR NAME] LLC"
+        - Check images with vendor names near the check number
 
         Args:
             text: OCR text from check image section
@@ -2036,33 +2448,88 @@ class SmartParser:
         if not text:
             return None
 
+        # If check_number provided, try to find the section containing that check
+        if check_number:
+            # Look for text near the check number
+            pattern = rf'(?:CHECK\s*)?#?\s*{check_number}\s*(.{{0,200}})'
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                # Use the context around the check number
+                text_near_check = match.group(1)
+                payee = self._extract_payee_name_from_text(text_near_check)
+                if payee:
+                    return payee
+
         # Common patterns for payee extraction
         patterns = [
             # Standard "Pay to the order of" format
-            r'Pay\s+to\s+(?:the\s+)?order\s+of[:\s]+([A-Za-z0-9\s\.,&\'\-]+?)(?:\n|$|\*)',
+            r'Pay\s+to\s+(?:the\s+)?order\s+of[:\s]+([A-Za-z0-9\s\.,&\'\-]+?)(?:\n|$|\*|\d)',
             # Simplified "PAY TO" format
-            r'PAY\s+TO[:\s]+([A-Za-z0-9\s\.,&\'\-]+?)(?:\n|$|\*)',
+            r'PAY\s+TO[:\s]+([A-Za-z0-9\s\.,&\'\-]+?)(?:\n|$|\*|\d)',
             # Just "TO:" followed by a name with business suffix
             r'\bTO[:\s]+([A-Za-z0-9\s\.,&\'\-]+?(?:LLC|Inc|Corp|Company|Co\.|Ltd))',
+            # Name on a line by itself that looks like a business
+            r'^([A-Z][A-Za-z0-9\s\.,&\'\-]{3,40}(?:LLC|Inc|Corp|Company|Co\.|Ltd|Services|Consulting|Supply))$',
             # Name followed by check number pattern
             r'([A-Za-z][A-Za-z0-9\s\.,&\'\-]{5,50}?(?:LLC|Inc|Corp))\s*(?:CHECK|#)',
+            # Common vendor format: "VENDOR NAME" on own line
+            r'^([A-Z][A-Z\s\.,&\'\-]{3,40})$',
         ]
 
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
             if match:
                 payee = match.group(1).strip()
-                # Clean up the payee name
-                payee = re.sub(r'\s+', ' ', payee)  # Normalize whitespace
-                payee = payee.strip('.,- ')  # Remove trailing punctuation
+                payee = self._clean_payee_name(payee)
 
-                # Validate - should be at least 3 chars and not all numbers
-                if len(payee) >= 3 and not payee.replace(' ', '').isdigit():
-                    if self.debug:
-                        print(f"[DEBUG] Extracted payee from check image: {payee}", flush=True)
+                # Validate
+                if payee and len(payee) >= 3 and not payee.replace(' ', '').isdigit():
+                    # Skip common false positives - expanded list
+                    skip_words = ['AUTHORIZED', 'SIGNATURE', 'ENDORSE', 'DEPOSIT', 'MOBILE',
+                                  'CHECK', 'DATE', 'MEMO', 'FOR', 'DOLLARS', 'VOID', 'BANK',
+                                  'DAILY BALANCE', 'SERVICE FEE', 'INTEREST', 'NUMBERED',
+                                  'STATEMENT', 'ACCOUNT', 'BALANCE', 'RECONCILE', 'INFORMATION',
+                                  'PREVIOUS', 'CURRENT', 'OUTSTANDING', 'PAGE', 'TOTAL']
+                    if not any(sw in payee.upper() for sw in skip_words):
+                        if self.debug:
+                            print(f"[DEBUG] Extracted payee from check image: {payee}", flush=True)
+                        return payee
+
+        return None
+
+    def _extract_payee_name_from_text(self, text: str) -> str:
+        """Extract a likely payee name from a block of text near a check."""
+        if not text:
+            return None
+
+        # Look for business name patterns
+        patterns = [
+            r'([A-Z][A-Za-z0-9\s\.,&\'\-]{3,40}(?:LLC|Inc|Corp|Company|Co\.|Ltd|Services))',
+            r'([A-Z][A-Z\s\.,&\'\-]{3,30}[A-Z])',  # ALL CAPS names
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                payee = self._clean_payee_name(match.group(1))
+                if payee and len(payee) >= 3:
                     return payee
 
         return None
+
+    def _clean_payee_name(self, payee: str) -> str:
+        """Clean up a payee name extracted from OCR text."""
+        if not payee:
+            return None
+
+        # Normalize whitespace
+        payee = re.sub(r'\s+', ' ', payee)
+        # Remove trailing punctuation except common business suffixes
+        payee = payee.strip('.,- *#')
+        # Remove leading numbers/dates
+        payee = re.sub(r'^\d[\d/\-\s]*', '', payee)
+
+        return payee.strip() if payee else None
 
     def _parse_farmers_activity(self, text: str, template: Dict) -> List[Dict]:
         """

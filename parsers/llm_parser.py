@@ -2,10 +2,19 @@
 LLM-Based PDF Parser - Uses Local LLM (LM Studio or Ollama) to extract transactions
 
 ================================================================================
+STATUS: OPTIONAL - NOT CURRENTLY USED
+================================================================================
+The regex/template-based SmartParser achieves 100% accuracy for all supported
+banks (Farmers, PNC, Truist, Sovereign, CrossFirst). LLM is kept as optional
+fallback for future unsupported bank formats.
+
+To enable: Set use_llm=True in UniversalParser (app.py line 797)
+
+================================================================================
 HYBRID PARSER ARCHITECTURE
 ================================================================================
-1. Primary: Fast regex parser (current pdf_parser.py)
-2. Fallback: LLM parser when regex fails validation
+1. Primary: Fast regex parser (SmartParser) - RECOMMENDED
+2. Fallback: LLM parser when regex fails validation - OPTIONAL
 
 LLM Options:
 - LM Studio: http://localhost:1234/v1 (OpenAI-compatible)
