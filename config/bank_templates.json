@@ -13,7 +13,7 @@
   },
   "banks": {
     "CrossFirst": {
-      "identifiers": ["CrossFirst", "Cross First", "IntraFi", "ICS", "IntraFi Cash Service"],
+      "identifiers": ["CrossFirst", "Cross First", "IntraFi Cash Service", "IntraFi Network"],
       "requires_ocr": true,
       "transaction_patterns": [
         {
@@ -58,15 +58,15 @@
       "requires_ocr": true,
       "sections": {
         "deposits": {
-          "start_markers": ["ACH Additions", "Other Additions", "Deposits and Other"],
-          "end_markers": ["ACH Deductions", "Service Charges", "Daily Balance"]
+          "start_markers": ["ACH Additions", "Other Additions"],
+          "end_markers": ["ACH Deductions", "Service Charges", "Daily Balance", "Checks and Other Deductions"]
         },
         "withdrawals": {
-          "start_markers": ["ACH Deductions", "Other Deductions", "Service Charges", "Checks and Other"],
-          "end_markers": ["Daily Balance", "Detail of Services", "YOUR CARD PROCESSING"]
+          "start_markers": ["ACH Deductions", "Service Charges and Fees", "Checks and Other Deductions"],
+          "end_markers": ["Daily Balance", "Detail of Services", "YOUR CARD PROCESSING", "Activity Detail"]
         }
       },
-      "skip_patterns": ["Daily Balance", "YOUR CARD PROCESSING STATEMENT", "Balance Summary"],
+      "skip_patterns": ["Daily Balance", "YOUR CARD PROCESSING STATEMENT", "Balance Summary", "Ledger balance", "Date Ledger"],
       "transaction_pattern": "^(\\d{1,2}/\\d{1,2})\\s+([\\d,]+\\.\\d{2})\\s+(.+)",
       "date_format": "MM/DD",
       "summary_patterns": {
