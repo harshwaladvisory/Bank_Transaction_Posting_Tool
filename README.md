@@ -20,6 +20,18 @@ Automates the complete workflow from bank statement upload to accounting system-
 
 ## Features
 
+### Multiple File Upload
+
+Upload multiple bank statements at once with an intuitive interface:
+
+| Feature | Description |
+|---------|-------------|
+| **Drag & Drop** | Drag multiple files onto the upload zone |
+| **File Picker** | Hold Ctrl to select multiple files in dialog |
+| **Add More** | Click "Add More" to include additional files |
+| **File Preview** | See all selected files before processing |
+| **Combined Processing** | All files processed and merged into single review |
+
 ### Smart Parser Architecture
 
 The tool uses a **template-based regex parser** that achieves 100% accuracy for supported banks:
@@ -50,6 +62,17 @@ The tool uses a **template-based regex parser** that achieves 100% accuracy for 
 | **Vendor Matching** | Fuzzy matching against vendor master list |
 | **Customer/Grant Matching** | Identifies government grants (HUD, DOE, HHS) |
 | **Confidence Scoring** | High (>85%), Medium (60-85%), Low (<60%) |
+
+### Confidence Filter
+
+The review page includes interactive confidence filtering:
+
+| Feature | Description |
+|---------|-------------|
+| **Column Header Filter** | Click "Confidence" dropdown in table header |
+| **Clickable Badges** | Click any confidence badge to filter by that level |
+| **Active Indicator** | Shows current filter with clear button |
+| **Quick Navigation** | Easily focus on items needing review |
 
 ### Module Routing
 
@@ -349,6 +372,12 @@ POPPLER_PATH = r'C:\path\to\poppler\bin'
 ## Version History
 
 ### v2.2.0 (December 2025)
+- **UI Enhancements**
+  - Multiple file upload support (drag & drop, file picker, "Add More" button)
+  - Confidence filter dropdown in review table column header
+  - Clickable confidence badges for quick filtering
+  - Active filter indicator with clear button
+  - CDN switched to cdnjs (Cloudflare) for better compatibility
 - **Performance Optimizations**
   - OCR caching with file-hash based storage (2000x faster on repeat)
   - Reduced DPI from 500 to 350 (30% faster)
@@ -361,6 +390,7 @@ POPPLER_PATH = r'C:\path\to\poppler\bin'
 - **Parser Improvements**
   - Multi-year statement handling for Farmers Bank
   - Statement period extraction for all banks
+  - CrossFirst Bank withdrawal date extraction fixes
   - Improved duplicate detection
 - **Classification Enhancements**
   - High-confidence bank transaction detection (SERVICE FEE, INTEREST)
