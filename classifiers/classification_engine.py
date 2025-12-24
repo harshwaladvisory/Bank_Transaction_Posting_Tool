@@ -65,9 +65,17 @@ GL_CODE_MAPPING = {
     'telecommunications': {'gl': '7100', 'name': 'Telecommunications', 'module': 'CD'},
     'taxes': {'gl': '7200', 'name': 'Taxes (IRS/State)', 'module': 'CD'},
     'vendor_payment': {'gl': '7300', 'name': 'Vendor Payments', 'module': 'CD'},
-    'bank_fees': {'gl': '6100', 'name': 'Bank Fees & Charges', 'module': 'CD'},
+    'bank_fees': {'gl': '6100', 'name': 'Bank Fees & Charges', 'module': 'JV'},  # SOP: Bank fees go to JV
+    'merchant_fees': {'gl': '6100', 'name': 'Merchant Processing Fees', 'module': 'JV'},  # Credit card processing fees
     'interest_expense': {'gl': '7600', 'name': 'Interest Expense', 'module': 'JV'},
     'miscellaneous': {'gl': '7900', 'name': 'Miscellaneous Expense', 'module': 'CD'},
+
+    # Credit Card / Merchant Revenue
+    'credit_card_revenue': {'gl': '4300', 'name': 'Credit Card Sales Revenue', 'module': 'CR'},
+    'merchant_deposit': {'gl': '4300', 'name': 'Merchant Deposit Revenue', 'module': 'CR'},
+
+    # State/Government Payments
+    'state_payment': {'gl': '4140', 'name': 'State Government Revenue', 'module': 'CR'},
 }
 
 # Keyword to GL Code mapping
@@ -114,12 +122,25 @@ KEYWORD_GL_MAPPING = {
     'office': 'office_supplies', 'supplies': 'office_supplies', 'staples': 'office_supplies',
     'amazon': 'office_supplies', 'walmart': 'office_supplies',
 
-    # Bank & Fees
+    # Bank & Fees (SOP: Bank fees go to JV)
     'bank fee': 'bank_fees', 'service charge': 'bank_fees', 'monthly fee': 'bank_fees',
     'maintenance fee': 'bank_fees', 'nsf': 'bank_fees', 'overdraft': 'bank_fees',
-    'wire fee': 'bank_fees', 'analysis charge': 'bank_fees',
+    'wire fee': 'bank_fees', 'analysis charge': 'bank_fees', 'analysis service': 'bank_fees',
     'service fee': 'bank_fees',  # Bank service fees
     'interest charge': 'interest_expense', 'finance charge': 'interest_expense',
+
+    # Merchant/Credit Card Processing (SOP: Fees go to JV, Deposits go to CR)
+    'merchant deposit': 'merchant_deposit', 'pnc merchant deposit': 'merchant_deposit',
+    'credit card deposit': 'credit_card_revenue', 'card deposit': 'credit_card_revenue',
+    'merchant discount': 'merchant_fees', 'pnc merchant discount': 'merchant_fees',
+    'merchant fee': 'merchant_fees', 'pnc merchant fee': 'merchant_fees',
+    'processing fee': 'merchant_fees', 'card processing': 'merchant_fees',
+    'clover': 'merchant_fees',  # Clover payment processing
+
+    # State/Government Payments
+    'nc department': 'state_payment', 'nc dept': 'state_payment',
+    'department of administration': 'state_payment', 'doa': 'state_payment',
+    'state of nc': 'state_payment', 'state payment': 'state_payment',
 }
 
 
@@ -204,30 +225,43 @@ class ClassificationEngine:
         # 1.5. High-confidence bank-generated transaction detection
         # These transactions are unambiguous - they come directly from the bank
         # Order matters - more specific matches first, then general matches
+        # SOP RULE: Bank-only items, corrections, interest, fees → Journal Voucher (JV)
         HIGH_CONFIDENCE_BANK_KEYWORDS = [
             # Interest Income - must be checked carefully to avoid matching "interest expense"
-            ('interest credit', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
-            ('interest earned', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
-            ('interest paid', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
-            ('interest income', {'module': 'CR', 'gl_code': '4600', 'category': 'Interest Income'}),
-            # Bank Service Fees
-            ('service fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Fee'}),
-            ('service charge', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Service Charge'}),
-            ('monthly fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Monthly Fee'}),
-            ('maintenance fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Bank Maintenance Fee'}),
-            ('nsf fee', {'module': 'CD', 'gl_code': '6100', 'category': 'NSF Fee'}),
-            ('overdraft fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Overdraft Fee'}),
-            ('wire transfer fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Transfer Fee'}),
-            ('wire fee', {'module': 'CD', 'gl_code': '6100', 'category': 'Wire Fee'}),
+            ('interest credit', {'module': 'JV', 'gl_code': '4600', 'category': 'Interest Income'}),
+            ('interest earned', {'module': 'JV', 'gl_code': '4600', 'category': 'Interest Income'}),
+            ('interest paid', {'module': 'JV', 'gl_code': '4600', 'category': 'Interest Income'}),
+            ('interest income', {'module': 'JV', 'gl_code': '4600', 'category': 'Interest Income'}),
+            # Bank Service Fees - SOP says JV for bank fees
+            ('service fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Bank Service Fee'}),
+            ('service charge', {'module': 'JV', 'gl_code': '6100', 'category': 'Bank Service Charge'}),
+            ('analysis service', {'module': 'JV', 'gl_code': '6100', 'category': 'Analysis Service Charge'}),
+            ('monthly fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Bank Monthly Fee'}),
+            ('maintenance fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Bank Maintenance Fee'}),
+            ('nsf fee', {'module': 'JV', 'gl_code': '6100', 'category': 'NSF Fee'}),
+            ('overdraft fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Overdraft Fee'}),
+            ('wire transfer fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Wire Transfer Fee'}),
+            ('wire fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Wire Fee'}),
+            # Merchant/Credit Card Fees - SOP says JV for bank fees
+            ('merchant discount', {'module': 'JV', 'gl_code': '6100', 'category': 'Merchant Discount Fee'}),
+            ('merchant fee', {'module': 'JV', 'gl_code': '6100', 'category': 'Merchant Processing Fee'}),
+            ('pnc merchant discount', {'module': 'JV', 'gl_code': '6100', 'category': 'PNC Merchant Discount'}),
+            ('pnc merchant fee', {'module': 'JV', 'gl_code': '6100', 'category': 'PNC Merchant Fee'}),
+            # Clover fees
+            ('clover', {'module': 'JV', 'gl_code': '6100', 'category': 'Clover Processing Fee'}),
+            # Merchant Deposits (Revenue) - CR
+            ('merchant deposit', {'module': 'CR', 'gl_code': '4300', 'category': 'Merchant Deposit Revenue'}),
+            ('pnc merchant deposit', {'module': 'CR', 'gl_code': '4300', 'category': 'PNC Merchant Deposit'}),
         ]
 
         # Check for exact "INTEREST" match first (common bank transaction)
         # This handles cases where description is just "INTEREST" without any other qualifiers
+        # SOP: Interest income goes to JV, not CR
         if desc_lower.strip() == 'interest' or desc_lower.startswith('interest ') or ' interest' in desc_lower:
             # Make sure it's not "interest expense" or "interest charge" (which are expenses)
             if 'expense' not in desc_lower and 'charge' not in desc_lower:
                 bank_txn_result = {
-                    'module': 'CR',
+                    'module': 'JV',  # SOP: Bank interest goes to JV
                     'confidence': 0.98,  # Very high confidence for INTEREST
                     'classifier': 'bank_transaction',
                     'priority': 0,  # Highest priority
@@ -366,19 +400,25 @@ class ClassificationEngine:
 
         # CRITICAL: For deposits (positive amounts), ONLY allow CR or JV, never CD
         # For withdrawals (negative amounts), ONLY allow CD or JV, never CR
+        # JV is allowed for both directions (bank fees, interest, corrections)
         valid_classifications = []
 
         for c in classifications:
             module = c.get('module', 'UNKNOWN')
 
+            # JV is always valid regardless of amount direction (per SOP)
+            if module == 'JV':
+                valid_classifications.append(c)
+                continue
+
             # Strict validation based on transaction direction
             if is_deposit or amount > 0:
                 # DEPOSIT: Only CR or JV allowed
-                if module in ['CR', 'JV']:
+                if module == 'CR':
                     valid_classifications.append(c)
             else:
                 # WITHDRAWAL: Only CD or JV allowed
-                if module in ['CD', 'JV']:
+                if module == 'CD':
                     valid_classifications.append(c)
 
             # Always include UNKNOWN for fallback
