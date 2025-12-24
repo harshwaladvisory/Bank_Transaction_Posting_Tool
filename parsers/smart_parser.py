@@ -3236,6 +3236,24 @@ class SmartParser:
                 except:
                     pass
 
+        # Fallback: Try to extract from Summary of Accounts table
+        # Format: "Account ID ... Opening Balance Ending Balance"
+        #         "XXXXX ... $706,367.18 $706,570.50"
+        # Or: "TOTAL $706,367.18 $706,570.50"
+        if opening_balance is None or ending_balance is None:
+            # Look for TOTAL line with two amounts
+            total_match = re.search(r'TOTAL\s+\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})', text, re.IGNORECASE)
+            if total_match:
+                try:
+                    if opening_balance is None:
+                        opening_balance = float(total_match.group(1).replace(',', ''))
+                    if ending_balance is None:
+                        ending_balance = float(total_match.group(2).replace(',', ''))
+                    if self.debug:
+                        print(f"[DEBUG] CrossFirst: Extracted balances from TOTAL line", flush=True)
+                except:
+                    pass
+
         # If we don't have both balances, return the OCR amount
         if opening_balance is None or ending_balance is None:
             if self.debug:
@@ -3363,8 +3381,11 @@ class SmartParser:
 
         The detail section often has garbled text like:
             04/17/0025" svete Withdcoual ; sntevnntntttnnnnnnieennnae ~s tae, 00)"
+            04/97/2025 ccm END cain ( $145.00) $706,222.18
 
-        We look for: date pattern + withdrawal-like keyword nearby
+        We look for:
+        1. date pattern + withdrawal-like keyword nearby
+        2. date pattern + parenthetical amount (indicates withdrawal)
         """
         lines = text.split('\n')
         in_detail_section = False
@@ -3379,20 +3400,46 @@ class SmartParser:
             if not in_detail_section:
                 continue
 
-            # Look for withdrawal indicator (garbled or not)
+            # Look for withdrawal indicator (garbled or not) OR parenthetical amount
             line_lower = line.lower()
-            if 'withd' in line_lower or 'withdraw' in line_lower:
-                # Try to extract date from this line - allow garbled years
-                # Pattern: MM/DD/XXXX where XXXX might be garbled (0025 instead of 2025)
+            is_withdrawal_line = (
+                'withd' in line_lower or
+                'withdraw' in line_lower or
+                re.search(r'\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line)  # Parenthetical amount = withdrawal
+            )
+
+            if is_withdrawal_line:
+                # Try to extract date from this line - allow garbled dates
+                # Pattern: MM/DD/XXXX where day or year might be garbled
                 date_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', line)
                 if date_match:
                     month, day, year = date_match.group(1), date_match.group(2), date_match.group(3)
+                    month_int = int(month)
+                    day_int = int(day)
+
                     # Fix garbled year (0025 -> 2025, 0024 -> 2024)
                     if year.startswith('00'):
                         year = '20' + year[2:]
-                    # Validate
-                    if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
-                        return f"{month}/{day}/{year}"
+
+                    # Fix garbled day (97 -> 17, 99 -> 19)
+                    if day_int > 31:
+                        if day_int > 90:
+                            day_int = day_int - 80  # 97 -> 17, 99 -> 19
+                        elif day_int > 70:
+                            day_int = day_int - 60  # 79 -> 19
+                        elif day_int > 50:
+                            day_int = day_int - 40  # 57 -> 17
+
+                    # Fix garbled month
+                    if month_int > 12:
+                        if month_int > 90:
+                            month_int = month_int - 90
+                        elif month_int > 80:
+                            month_int = month_int - 80
+
+                    # Validate after fixing
+                    if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                        return f"{month_int:02d}/{day_int:02d}/{year}"
 
         return None
 
