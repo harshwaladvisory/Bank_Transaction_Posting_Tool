@@ -375,6 +375,31 @@ class SmartParser:
                 else:
                     page_text = quick_text
 
+                # For CrossFirst and similar table-based statements,
+                # PSM 6 may miss withdrawal lines. Try PSM 3 as well.
+                if 'CrossFirst' in quick_text or 'IntraFi' in quick_text or 'Account Transaction Detail' in quick_text:
+                    # PSM 3 is better for fully automatic page segmentation
+                    psm3_config = r'--oem 3 --psm 3'
+                    psm3_text = pytesseract.image_to_string(image, config=psm3_config)
+
+                    # Check if PSM 3 captured withdrawal data that PSM 6 missed
+                    has_withdrawal_psm6 = bool(re.search(r'[Ww]ithdrawal.*\d+\.\d{2}', page_text))
+                    has_withdrawal_psm3 = bool(re.search(r'[Ww]ithdrawal.*\d+\.\d{2}', psm3_text))
+
+                    if has_withdrawal_psm3 and not has_withdrawal_psm6:
+                        # PSM 3 found withdrawal that PSM 6 missed - use PSM 3
+                        if self.debug:
+                            print(f"[DEBUG] Page {i+1}: Using PSM 3 - found withdrawal data", flush=True)
+                        page_text = psm3_text
+                    elif has_withdrawal_psm3:
+                        # Both have withdrawal, merge relevant lines
+                        for line in psm3_text.split('\n'):
+                            if re.search(r'[Ww]ithdrawal.*\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line):
+                                if line.strip() not in page_text:
+                                    page_text += '\n' + line.strip()
+                                    if self.debug:
+                                        print(f"[DEBUG] Merged withdrawal line from PSM 3: {line.strip()[:60]}", flush=True)
+
                 if page_text:
                     all_text += page_text + "\n"
                     processed_count += 1
@@ -2654,9 +2679,10 @@ class SmartParser:
         deposit_patterns = [
             # Very flexible: date + Interest/Capitalization keyword + amount (may have space before decimal)
             # This handles: "05/30/2025 Interest Capitalization — 360. 05 ..."
-            r'(\d{2}/\d{2}/\d{4})\s+[^0-9]*?(Interest\s*Capitalization)[^0-9]*?(\d+)\s*[.]\s*(\d{2})',
-            r'(\d{2}/\d{2}/\d{4})\s+[^0-9]*?(Interest)[^0-9]*?(\d+)\s*[.]\s*(\d{2})',
-            r'(\d{2}/\d{2}/\d{4})\s+[^0-9]*?(Capitalization)[^0-9]*?(\d+)\s*[.]\s*(\d{2})',
+            # Use word boundary to stop at Interest Capitalization, not capture garbage after
+            r'(\d{2}/\d{2}/\d{4})\s+[^0-9]*?(Interest\s*Capitalization)\b[^0-9]*?(\d+)\s*[.]\s*(\d{2})',
+            r'(\d{2}/\d{2}/\d{4})\s+[^0-9]*?\b(Interest)\b[^0-9]*?(\d+)\s*[.]\s*(\d{2})',
+            r'(\d{2}/\d{2}/\d{4})\s+[^0-9]*?\b(Capitalization)\b[^0-9]*?(\d+)\s*[.]\s*(\d{2})',
             # Standard: date + description + amount + balance (clean format)
             r'(\d{2}/\d{2}/\d{4})\s+["\']?([A-Za-z][A-Za-z\s]+?)\s+(\d{2,3}\.\d{2})\s+[\d,]+\.\d{2}',
         ]
@@ -2698,9 +2724,12 @@ class SmartParser:
                         else:
                             amount_str = match.group(3)
 
-                        # Clean description
-                        description = re.sub(r'["|\'|_\-—]+', '', description).strip()
+                        # Clean description - remove OCR artifacts like |, ), (, quotes, etc.
+                        description = re.sub(r'[\"|\'|\|_\-—\(\)\[\]]+', '', description).strip()
                         description = re.sub(r'\s+', ' ', description)
+                        # Standardize common OCR misreads
+                        if 'Interest' in description or 'Capitalization' in description:
+                            description = 'Interest Capitalization'
 
                         # Parse amount - handle OCR spaces
                         amount_str = amount_str.replace(' ', '').replace(',', '')
@@ -3203,36 +3232,36 @@ class SmartParser:
         ending_balance = None
 
         # Look for balance patterns
-        # Pattern: "Opening Balance ... $706,152.33" or "Previous Period Ending Balance ... $706,152.33"
-        # OCR may add spaces, underscores, or other noise between words and amounts
+        # Pattern: "Previous Period Ending Balance ... $706,152.33"
+        # Must have $ and reasonable amount (>$100) to avoid matching interest rate (0.60%)
         opening_patterns = [
-            r'Previous\s+Period\s+Ending\s+Balance[^\d]*([\d,\s]+\.\s*\d{2})',
-            r'Opening\s+Balance[^\d]*([\d,\s]+\.\s*\d{2})',
+            r'Previous\s+Period\s+Ending\s+Balance[^\$]*\$\s*([\d,]+\.\d{2})',
         ]
         for pattern in opening_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 try:
-                    # Remove spaces and other OCR noise from amount
                     amount_str = match.group(1).replace(',', '').replace(' ', '')
-                    opening_balance = float(amount_str)
-                    break
+                    amount = float(amount_str)
+                    if amount > 100:  # Reasonable balance, not interest rate
+                        opening_balance = amount
+                        break
                 except:
                     pass
 
-        # Pattern: "Current Period Ending Balance ... $706,367.18" or "Ending Balance ... $706,367.18"
+        # Pattern: "Current Period Ending Balance ... $706,367.18"
         ending_patterns = [
-            r'Current\s+Period\s+Ending\s+Balance[^\d]*([\d,\s]+\.\s*\d{2})',
-            r'Ending\s+Balance[^\d]*([\d,\s]+\.\s*\d{2})',
+            r'Current\s+Period\s+Ending\s+Balance[^\$]*\$\s*([\d,]+\.\d{2})',
         ]
         for pattern in ending_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 try:
-                    # Remove spaces and other OCR noise from amount
                     amount_str = match.group(1).replace(',', '').replace(' ', '')
-                    ending_balance = float(amount_str)
-                    break
+                    amount = float(amount_str)
+                    if amount > 100:  # Reasonable balance
+                        ending_balance = amount
+                        break
                 except:
                     pass
 
