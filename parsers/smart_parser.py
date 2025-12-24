@@ -319,13 +319,31 @@ class SmartParser:
             if TESSERACT_CMD and os.path.exists(TESSERACT_CMD):
                 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-            print("[INFO] Converting PDF to images (350 DPI)...", flush=True)
+            # Check if this might be a CrossFirst statement by peeking at first page
+            # CrossFirst requires higher DPI (400+) for PSM 4 to capture withdrawal lines
+            dpi = 350  # Default DPI
 
-            # Single PDF conversion at moderate DPI
+            # Quick check with first page at low DPI to detect bank
             if POPPLER_PATH and os.path.exists(POPPLER_PATH):
-                images = convert_from_path(file_path, dpi=350, poppler_path=POPPLER_PATH)
+                peek_images = convert_from_path(file_path, dpi=150, poppler_path=POPPLER_PATH, first_page=1, last_page=1)
             else:
-                images = convert_from_path(file_path, dpi=350)
+                peek_images = convert_from_path(file_path, dpi=150, first_page=1, last_page=1)
+
+            if peek_images:
+                peek_text = pytesseract.image_to_string(peek_images[0], config='--oem 3 --psm 6')
+                if 'CrossFirst' in peek_text or 'IntraFi' in peek_text or 'CROSSFIRST' in peek_text:
+                    dpi = 400  # Higher DPI for CrossFirst to capture transaction details
+                    if self.debug:
+                        print("[DEBUG] Detected CrossFirst - using 400 DPI for better OCR", flush=True)
+                del peek_images
+
+            print(f"[INFO] Converting PDF to images ({dpi} DPI)...", flush=True)
+
+            # Single PDF conversion
+            if POPPLER_PATH and os.path.exists(POPPLER_PATH):
+                images = convert_from_path(file_path, dpi=dpi, poppler_path=POPPLER_PATH)
+            else:
+                images = convert_from_path(file_path, dpi=dpi)
 
             total_pages = len(images)
             print(f"[INFO] Processing {total_pages} pages with smart OCR...", flush=True)
@@ -376,29 +394,59 @@ class SmartParser:
                     page_text = quick_text
 
                 # For CrossFirst and similar table-based statements,
-                # PSM 6 may miss withdrawal lines. Try PSM 3 as well.
+                # PSM 6 often misses withdrawal lines entirely due to table formatting.
+                # Try PSM 4 (single column) which works best for CrossFirst tables.
                 if 'CrossFirst' in quick_text or 'IntraFi' in quick_text or 'Account Transaction Detail' in quick_text:
-                    # PSM 3 is better for fully automatic page segmentation
-                    psm3_config = r'--oem 3 --psm 3'
-                    psm3_text = pytesseract.image_to_string(image, config=psm3_config)
+                    # Helper to check for withdrawal with date on same line
+                    def has_withdrawal_with_date(text):
+                        for line in text.split('\n'):
+                            # Date followed by anything then Withdrawal (may have OCR garbage between)
+                            if re.search(r'\d{2}/\d{2}/\d{4}', line) and re.search(r'[Ww]ithd', line):
+                                return True
+                            # Date on line that has parenthetical amount (withdrawal indicator)
+                            if re.search(r'\d{2}/\d{2}/\d{4}', line) and re.search(r'\([^)]*\d+\.\d{2}', line):
+                                return True
+                        return False
 
-                    # Check if PSM 3 captured withdrawal data that PSM 6 missed
-                    has_withdrawal_psm6 = bool(re.search(r'[Ww]ithdrawal.*\d+\.\d{2}', page_text))
-                    has_withdrawal_psm3 = bool(re.search(r'[Ww]ithdrawal.*\d+\.\d{2}', psm3_text))
+                    has_withdrawal_psm6 = has_withdrawal_with_date(page_text)
 
-                    if has_withdrawal_psm3 and not has_withdrawal_psm6:
-                        # PSM 3 found withdrawal that PSM 6 missed - use PSM 3
-                        if self.debug:
-                            print(f"[DEBUG] Page {i+1}: Using PSM 3 - found withdrawal data", flush=True)
-                        page_text = psm3_text
-                    elif has_withdrawal_psm3:
-                        # Both have withdrawal, merge relevant lines
-                        for line in psm3_text.split('\n'):
-                            if re.search(r'[Ww]ithdrawal.*\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line):
-                                if line.strip() not in page_text:
-                                    page_text += '\n' + line.strip()
-                                    if self.debug:
-                                        print(f"[DEBUG] Merged withdrawal line from PSM 3: {line.strip()[:60]}", flush=True)
+                    if not has_withdrawal_psm6:
+                        # PSM 4 (single column) works best for CrossFirst transaction tables
+                        psm4_crossfirst = r'--oem 3 --psm 4'
+                        psm4_text = pytesseract.image_to_string(image, config=psm4_crossfirst)
+
+                        has_withdrawal_psm4 = has_withdrawal_with_date(psm4_text)
+
+                        if has_withdrawal_psm4:
+                            if self.debug:
+                                print(f"[DEBUG] Page {i+1}: Using PSM 4 - found withdrawal with date", flush=True)
+                            page_text = psm4_text
+                        else:
+                            # PSM 11 produces fragmented output, only use as last resort
+                            # and only if it captures the date + withdrawal on coherent lines
+                            psm11_config = r'--oem 3 --psm 11'
+                            psm11_text = pytesseract.image_to_string(image, config=psm11_config)
+
+                            # For PSM 11, check if we have better transaction data
+                            # PSM 11 often fragments data, so we check for date patterns more carefully
+                            if has_withdrawal_with_date(psm11_text):
+                                if self.debug:
+                                    print(f"[DEBUG] Page {i+1}: Using PSM 11 - found withdrawal with date", flush=True)
+                                page_text = psm11_text
+
+                    # If still no withdrawal found, try PSM 3 as final fallback
+                    if not has_withdrawal_with_date(page_text):
+                        psm3_config = r'--oem 3 --psm 3'
+                        psm3_text = pytesseract.image_to_string(image, config=psm3_config)
+
+                        if re.search(r'[Ww]ithdrawal.*\d+\.\d{2}', psm3_text):
+                            # Merge withdrawal lines from PSM 3
+                            for line in psm3_text.split('\n'):
+                                if re.search(r'[Ww]ithdrawal.*\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line):
+                                    if line.strip() not in page_text:
+                                        page_text += '\n' + line.strip()
+                                        if self.debug:
+                                            print(f"[DEBUG] Merged withdrawal line from PSM 3: {line.strip()[:60]}", flush=True)
 
                 if page_text:
                     all_text += page_text + "\n"
@@ -810,6 +858,11 @@ class SmartParser:
             if any(skip.lower() in line_lower for skip in skip_patterns):
                 continue
 
+            # Skip generic template parsing for CrossFirst - use specialized parsers instead
+            # CrossFirst OCR is often garbled, so we need amount validation from summary
+            if self.bank_name == 'CrossFirst':
+                continue
+
             # Try each pattern
             for pattern_config in patterns:
                 regex = pattern_config.get('pattern')
@@ -944,24 +997,40 @@ class SmartParser:
             deposit_txns = self._parse_crossfirst_detail_deposits(text, template, seen)
             transactions.extend(deposit_txns)
 
-            # If no deposits from detail parsing but we have expected deposit from summary, create one
+            # If no deposits from detail parsing, calculate from balance
             has_deposit = any(t.get('amount', 0) > 0 for t in transactions)
-            if not has_deposit and expected_deposit > 0:
-                # Get the deposit date - try to find Interest Capitalization date from detail section
-                deposit_date = self._extract_crossfirst_deposit_date(text) or self._extract_statement_date(text)
-                transactions.append({
-                    'date': deposit_date,
-                    'description': 'Interest Capitalization',
-                    'amount': abs(expected_deposit),
-                    'is_deposit': True,
-                    'module': 'CR',
-                    'confidence_score': 85,
-                    'confidence_level': 'high',
-                    'parsed_by': 'crossfirst_summary',
-                    'pattern_used': 'summary_deposit_fallback'
-                })
-                if self.debug:
-                    print(f"[DEBUG] CrossFirst: Created deposit from summary: {deposit_date} ${expected_deposit:.2f}", flush=True)
+            if not has_deposit:
+                # Try expected_deposit from summary first
+                deposit_amount = expected_deposit
+
+                # If no expected_deposit, calculate from balances
+                if deposit_amount <= 0:
+                    # Get balances for calculation
+                    opening_balance, ending_balance = self._extract_crossfirst_balances(text)
+                    if opening_balance and ending_balance and expected_withdrawal > 0:
+                        # Deposit = Ending - Opening + Withdrawal
+                        calculated_deposit = ending_balance - opening_balance + expected_withdrawal
+                        if calculated_deposit > 0:
+                            deposit_amount = calculated_deposit
+                            if self.debug:
+                                print(f"[DEBUG] CrossFirst: Calculated deposit from balance ${deposit_amount:.2f}", flush=True)
+
+                if deposit_amount > 0:
+                    # Get the deposit date - try to find Interest Capitalization date from detail section
+                    deposit_date = self._extract_crossfirst_deposit_date(text) or self._extract_statement_date(text)
+                    transactions.append({
+                        'date': deposit_date,
+                        'description': 'Interest Capitalization',
+                        'amount': abs(deposit_amount),
+                        'is_deposit': True,
+                        'module': 'CR',
+                        'confidence_score': 85,
+                        'confidence_level': 'high',
+                        'parsed_by': 'crossfirst_summary',
+                        'pattern_used': 'summary_deposit_fallback'
+                    })
+                    if self.debug:
+                        print(f"[DEBUG] CrossFirst: Created deposit from summary: {deposit_date} ${deposit_amount:.2f}", flush=True)
 
             # Parse detailed withdrawal lines from Account Transaction Detail
             detail_txns = self._parse_crossfirst_detail_withdrawals(text, template, seen, expected_withdrawal)
@@ -974,8 +1043,17 @@ class SmartParser:
             # If no withdrawal from details but we have validated withdrawal, create from summary
             has_withdrawal = any(t.get('amount', 0) < 0 for t in transactions)
             if not has_withdrawal and validated_withdrawal and validated_withdrawal > 0:
-                # Get date from detail section if possible
-                withdrawal_date = getattr(self, '_crossfirst_withdrawal_date', None) or self._extract_statement_date(text)
+                # Get date from detail section if possible - try to extract again if not found earlier
+                withdrawal_date = getattr(self, '_crossfirst_withdrawal_date', None)
+                if not withdrawal_date:
+                    # Try extraction again
+                    withdrawal_date = self._extract_crossfirst_withdrawal_date(text)
+                if not withdrawal_date:
+                    # Fallback to statement date
+                    withdrawal_date = self._extract_statement_date(text)
+                    if self.debug:
+                        print(f"[DEBUG] CrossFirst: Using statement date as fallback: {withdrawal_date}", flush=True)
+
                 transactions.append({
                     'date': withdrawal_date,
                     'description': 'Withdrawal',
@@ -3218,16 +3296,13 @@ class SmartParser:
 
         return transactions
 
-    def _validate_crossfirst_withdrawal_amount(self, text: str, ocr_withdrawal: float, transactions: List[Dict]) -> float:
+    def _extract_crossfirst_balances(self, text: str) -> Tuple[Optional[float], Optional[float]]:
         """
-        Validate and correct the withdrawal amount using balance reconciliation.
+        Extract opening and ending balances from CrossFirst statement.
 
-        OCR frequently garbles withdrawal amounts (e.g., 145.00 -> 445.00 or 245.00).
-        Use balance change + deposits to calculate the correct withdrawal.
-
-        Formula: withdrawal = deposits - (ending_balance - opening_balance)
+        Returns:
+            Tuple of (opening_balance, ending_balance), either may be None if not found.
         """
-        # Extract opening and ending balances
         opening_balance = None
         ending_balance = None
 
@@ -3282,6 +3357,20 @@ class SmartParser:
                         print(f"[DEBUG] CrossFirst: Extracted balances from TOTAL line", flush=True)
                 except:
                     pass
+
+        return (opening_balance, ending_balance)
+
+    def _validate_crossfirst_withdrawal_amount(self, text: str, ocr_withdrawal: float, transactions: List[Dict]) -> float:
+        """
+        Validate and correct the withdrawal amount using balance reconciliation.
+
+        OCR frequently garbles withdrawal amounts (e.g., 145.00 -> 445.00 or 245.00).
+        Use balance change + deposits to calculate the correct withdrawal.
+
+        Formula: withdrawal = deposits - (ending_balance - opening_balance)
+        """
+        # Extract opening and ending balances
+        opening_balance, ending_balance = self._extract_crossfirst_balances(text)
 
         # If we don't have both balances, return the OCR amount
         if opening_balance is None or ending_balance is None:
@@ -3412,14 +3501,24 @@ class SmartParser:
             04/17/0025" svete Withdcoual ; sntevnntntttnnnnnnieennnae ~s tae, 00)"
             04/97/2025 ccm END cain ( $145.00) $706,222.18
 
+        PSM 4/11 may produce cleaner output:
+            03/19/2025 Withdrawal ($145.00) $706,007.33
+            03/31/2025 Interest Capitalization 359.85 706,367.18
+
         We look for:
-        1. date pattern + withdrawal-like keyword nearby
+        1. date pattern + withdrawal-like keyword on same or nearby line
         2. date pattern + parenthetical amount (indicates withdrawal)
+        3. First date in detail section that's not the Interest Capitalization date
         """
         lines = text.split('\n')
         in_detail_section = False
+        interest_date = None
+        first_date_in_detail = None
+        all_dates_in_detail = []
+        withdrawal_nearby = False
 
-        for line in lines:
+        # First pass: collect all dates and check for withdrawal keyword nearby
+        for i, line in enumerate(lines):
             if 'Account Transaction Detail' in line or 'Transaction Detail' in line:
                 in_detail_section = True
                 continue
@@ -3429,46 +3528,73 @@ class SmartParser:
             if not in_detail_section:
                 continue
 
-            # Look for withdrawal indicator (garbled or not) OR parenthetical amount
             line_lower = line.lower()
-            is_withdrawal_line = (
-                'withd' in line_lower or
-                'withdraw' in line_lower or
-                re.search(r'\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line)  # Parenthetical amount = withdrawal
-            )
 
-            if is_withdrawal_line:
-                # Try to extract date from this line - allow garbled dates
-                # Pattern: MM/DD/XXXX where day or year might be garbled
-                date_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', line)
-                if date_match:
-                    month, day, year = date_match.group(1), date_match.group(2), date_match.group(3)
-                    month_int = int(month)
-                    day_int = int(day)
+            # Check if this line or nearby lines have withdrawal keyword
+            if 'withd' in line_lower or 'withdraw' in line_lower:
+                withdrawal_nearby = True
 
-                    # Fix garbled year (0025 -> 2025, 0024 -> 2024)
-                    if year.startswith('00'):
-                        year = '20' + year[2:]
+            # Look for any date in the detail section
+            date_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', line)
+            if date_match:
+                month, day, year = date_match.group(1), date_match.group(2), date_match.group(3)
+                month_int = int(month)
+                day_int = int(day)
 
-                    # Fix garbled day (97 -> 17, 99 -> 19)
-                    if day_int > 31:
-                        if day_int > 90:
-                            day_int = day_int - 80  # 97 -> 17, 99 -> 19
-                        elif day_int > 70:
-                            day_int = day_int - 60  # 79 -> 19
-                        elif day_int > 50:
-                            day_int = day_int - 40  # 57 -> 17
+                # Fix garbled year (0025 -> 2025, 0024 -> 2024)
+                if year.startswith('00'):
+                    year = '20' + year[2:]
 
-                    # Fix garbled month
-                    if month_int > 12:
-                        if month_int > 90:
-                            month_int = month_int - 90
-                        elif month_int > 80:
-                            month_int = month_int - 80
+                # Fix garbled day (97 -> 17, 99 -> 19)
+                if day_int > 31:
+                    if day_int > 90:
+                        day_int = day_int - 80
+                    elif day_int > 70:
+                        day_int = day_int - 60
+                    elif day_int > 50:
+                        day_int = day_int - 40
 
-                    # Validate after fixing
-                    if 1 <= month_int <= 12 and 1 <= day_int <= 31:
-                        return f"{month_int:02d}/{day_int:02d}/{year}"
+                # Fix garbled month
+                if month_int > 12:
+                    if month_int > 90:
+                        month_int = month_int - 90
+                    elif month_int > 80:
+                        month_int = month_int - 80
+
+                # Validate after fixing
+                if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                    fixed_date = f"{month_int:02d}/{day_int:02d}/{year}"
+
+                    # Check if this is the Interest Capitalization line
+                    if 'interest' in line_lower or 'capitalization' in line_lower:
+                        interest_date = fixed_date
+                    else:
+                        # Check for withdrawal indicators on this line
+                        is_withdrawal_line = (
+                            'withd' in line_lower or
+                            'withdraw' in line_lower or
+                            re.search(r'\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line)  # Parenthetical amount
+                        )
+                        if is_withdrawal_line:
+                            return fixed_date
+
+                        # Save this date with line number for later processing
+                        all_dates_in_detail.append((fixed_date, i, line))
+
+                        # Save first date as fallback
+                        if first_date_in_detail is None:
+                            first_date_in_detail = fixed_date
+
+        # If we found dates but no direct withdrawal match, check if the first non-interest
+        # date is likely the withdrawal date (especially for PSM 11 where columns are split)
+        for fixed_date, line_num, line in all_dates_in_detail:
+            if fixed_date != interest_date:
+                # This is likely the withdrawal date
+                return fixed_date
+
+        # If we found a first date that's different from interest date, use it
+        if first_date_in_detail and first_date_in_detail != interest_date:
+            return first_date_in_detail
 
         return None
 
