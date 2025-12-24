@@ -1,27 +1,51 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
 venv/
 env/
+.venv/
 
 # Environment variables
 .env
 .env.local
+.env.production
 
-# User Data (REMOVED - now using MongoDB only)
-# uploads/ - removed, files processed in-memory with tempfile
-# outputs/ - removed, stored in MongoDB
-# custom_master_data.json - removed, using MongoDB
+# Cache directories (regenerated automatically)
+data/ocr_cache/
+data/chroma_db/
+
+# Temporary files
+uploads/
+output/
+*.tmp
 
 # Logs
 logs/
 *.log
 
+# Debug files
+debug_*.py
+debug_*.png
+test_*.py
+
+# OCR output files
+*_ocr_output.txt
+*_ocr.txt
+ocr_output_*.txt
+
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+nul
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,596 @@
+================================================================================
+        BANK TRANSACTION POSTING TOOL - SECURITY & CONFIGURATION GUIDE
+================================================================================
+                    CONFIDENTIAL - FOR INTERNAL USE ONLY
+================================================================================
+
+Document Version: 1.0
+Last Updated: December 24, 2025
+Organization: Harshwal Consulting Services
+
+================================================================================
+                            TABLE OF CONTENTS
+================================================================================
+
+1. ENVIRONMENT VARIABLES
+2. CONFIGURATION FILE SETTINGS
+3. SECURITY BEST PRACTICES
+4. FILE PATHS & DEPENDENCIES
+5. DATABASE CONFIGURATION
+6. SERVER DEPLOYMENT
+7. BACKUP & RECOVERY
+8. TROUBLESHOOTING QUICK REFERENCE
+9. IMPORTANT COMMANDS
+10. CONTACT & SUPPORT
+
+================================================================================
+                        1. ENVIRONMENT VARIABLES
+================================================================================
+
+REQUIRED FOR PRODUCTION:
+------------------------
+
+SECRET_KEY
+    Description: Flask session encryption key (CRITICAL for security)
+    Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    Example: SECRET_KEY=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6
+
+    Windows (Command Prompt):
+        set SECRET_KEY=your-secret-key-here
+
+    Windows (PowerShell):
+        $env:SECRET_KEY="your-secret-key-here"
+
+    Linux/Mac:
+        export SECRET_KEY="your-secret-key-here"
+
+
+OPTIONAL ENVIRONMENT VARIABLES:
+-------------------------------
+
+MONGODB_URI
+    Description: MongoDB connection string
+    Default: mongodb://localhost:27017/
+    Example: MONGODB_URI=mongodb://username:password@localhost:27017/
+
+    For remote MongoDB:
+        MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/
+
+MONGODB_DATABASE
+    Description: Database name for storing transactions
+    Default: bank_posting_tool
+    Example: MONGODB_DATABASE=bank_posting_production
+
+PORT
+    Description: Server port number
+    Default: 8590
+    Example: PORT=8590
+
+FLASK_DEBUG
+    Description: Enable/disable debug mode
+    Default: True (development), False (production)
+    Example: FLASK_DEBUG=False
+    WARNING: Always set to False in production!
+
+FLASK_ENV
+    Description: Flask environment
+    Values: development, production
+    Example: FLASK_ENV=production
+
+
+================================================================================
+                      2. CONFIGURATION FILE SETTINGS
+================================================================================
+
+FILE: config.py
+---------------
+
+# Date format settings
+DATE_FORMAT = "%m/%d/%Y"
+DATE_FORMATS = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%d/%m/%Y"]
+
+# Default GL codes
+DEFAULT_BANK_GL = '1070'
+DEFAULT_FUND_CODE = '1000'
+
+# Confidence thresholds (decimal)
+CONFIDENCE_HIGH = 0.85      # 85% and above = High
+CONFIDENCE_MEDIUM = 0.60    # 60-84% = Medium
+CONFIDENCE_LOW = 0.40       # Below 60% = Low
+
+# OCR Settings - MUST UPDATE FOR YOUR SYSTEM
+TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+POPPLER_PATH = r'C:\poppler-24.08.0\Library\bin'
+
+# OCR Performance
+OCR_DPI = 350               # Lower = faster, Higher = more accurate
+OCR_CACHE_ENABLED = True    # Enable caching for 2000x speedup
+
+# Flask Settings
+FLASK_DEBUG = True          # Set False for production
+FLASK_PORT = 8590
+FLASK_HOST = '0.0.0.0'      # Listen on all interfaces
+
+# File Upload
+MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB max file size
+ALLOWED_EXTENSIONS = {'pdf', 'xlsx', 'xls', 'csv'}
+
+# Session Settings
+SESSION_TYPE = 'filesystem'
+PERMANENT_SESSION_LIFETIME = 3600  # 1 hour
+
+
+================================================================================
+                       3. SECURITY BEST PRACTICES
+================================================================================
+
+PRODUCTION DEPLOYMENT CHECKLIST:
+--------------------------------
+
+[ ] Set SECRET_KEY environment variable (never hardcode)
+[ ] Set FLASK_DEBUG=False
+[ ] Set FLASK_ENV=production
+[ ] Use HTTPS (configure reverse proxy)
+[ ] Configure MongoDB authentication
+[ ] Restrict network access (firewall)
+[ ] Enable audit logging
+[ ] Regular security updates
+[ ] Backup data regularly
+
+
+DATA PROTECTION:
+----------------
+
+1. All processing is LOCAL - no cloud uploads
+2. No external API calls for transaction data
+3. ChromaDB learning data stored locally in data/chroma_db/
+4. OCR cache stored locally in data/ocr_cache/
+5. Uploaded files stored temporarily, deleted after processing
+
+
+SENSITIVE FILES TO PROTECT:
+---------------------------
+
+data/keywords.json          - Classification rules
+data/vendors.json           - Vendor master list
+data/customers.json         - Customer information
+data/grants.json            - Grant programs
+data/learned_patterns.json  - ML patterns
+data/chroma_db/             - Vector embeddings
+logs/                       - Audit trail logs
+
+
+FILES TO NEVER COMMIT TO GIT:
+-----------------------------
+
+.env                        - Environment variables
+*.log                       - Log files
+data/ocr_cache/*            - OCR cache
+data/chroma_db/*            - Learning database
+uploads/*                   - Uploaded files
+output/*                    - Generated files
+__pycache__/                - Python cache
+venv/                       - Virtual environment
+
+
+================================================================================
+                      4. FILE PATHS & DEPENDENCIES
+================================================================================
+
+TESSERACT OCR:
+--------------
+
+Download: https://github.com/UB-Mannheim/tesseract/wiki
+Default Install Path: C:\Program Files\Tesseract-OCR\
+Executable: tesseract.exe
+
+Verify Installation:
+    tesseract --version
+
+Config Setting:
+    TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+
+POPPLER (PDF Processing):
+-------------------------
+
+Download: https://github.com/oschwartz10612/poppler-windows/releases
+Extract to: C:\poppler\ (or your preferred location)
+Required folder: bin\ (contains pdftoppm.exe, pdfinfo.exe)
+
+Verify Installation:
+    C:\poppler\bin\pdftoppm -h
+
+Config Setting:
+    POPPLER_PATH = r'C:\poppler\bin'
+
+
+PYTHON DEPENDENCIES:
+--------------------
+
+Core:
+    Flask>=2.0.0
+    pandas>=1.3.0
+    openpyxl>=3.0.0
+
+PDF Processing:
+    pdfplumber>=0.7.0
+    pdf2image>=1.16.0
+    pytesseract>=0.3.10
+    Pillow>=9.0.0
+
+Database:
+    pymongo>=4.0.0
+
+Learning:
+    chromadb>=0.3.0
+    sentence-transformers>=2.2.0
+
+Install all:
+    pip install -r requirements.txt
+
+
+================================================================================
+                       5. DATABASE CONFIGURATION
+================================================================================
+
+MONGODB (Optional but Recommended):
+-----------------------------------
+
+Purpose: Persist transactions, user data, audit logs
+
+Installation:
+    Download: https://www.mongodb.com/try/download/community
+    Install as Windows Service
+
+Start MongoDB:
+    net start MongoDB
+
+    OR
+
+    mongod --dbpath C:\data\db
+
+Connection Settings:
+    MONGODB_URI = "mongodb://localhost:27017/"
+    MONGODB_DATABASE = "bank_posting_tool"
+
+With Authentication:
+    MONGODB_URI = "mongodb://username:password@localhost:27017/"
+
+Collections Created:
+    - transactions      (processed transactions)
+    - audit_log        (user actions)
+    - gl_mappings      (GL code history)
+    - user_sessions    (session data)
+
+
+WITHOUT MONGODB:
+----------------
+
+The tool works without MongoDB but:
+    - Data not persisted across restarts
+    - No audit trail storage
+    - No multi-user session handling
+
+For single-user/demo use: MongoDB not required
+
+
+================================================================================
+                        6. SERVER DEPLOYMENT
+================================================================================
+
+DEVELOPMENT (Local):
+--------------------
+
+python app.py
+
+Access: http://localhost:8590
+
+
+PRODUCTION (Recommended Setup):
+-------------------------------
+
+Option 1: Gunicorn (Linux)
+    pip install gunicorn
+    gunicorn -w 4 -b 0.0.0.0:8590 app:app
+
+Option 2: Waitress (Windows)
+    pip install waitress
+    waitress-serve --host=0.0.0.0 --port=8590 app:app
+
+Option 3: IIS (Windows Server)
+    - Install wfastcgi
+    - Configure IIS with FastCGI handler
+
+
+NGINX REVERSE PROXY (HTTPS):
+----------------------------
+
+server {
+    listen 443 ssl;
+    server_name yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8590;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+
+FIREWALL RULES:
+---------------
+
+Allow:
+    - Port 8590 (application) - internal network only
+    - Port 443 (HTTPS) - if public facing
+    - Port 27017 (MongoDB) - localhost only
+
+Block:
+    - Direct access to port 8590 from internet
+    - Direct access to MongoDB from internet
+
+
+================================================================================
+                         7. BACKUP & RECOVERY
+================================================================================
+
+WHAT TO BACKUP:
+---------------
+
+Critical (Daily):
+    - data/keywords.json
+    - data/vendors.json
+    - data/customers.json
+    - data/grants.json
+    - data/learned_patterns.json
+    - MongoDB database
+
+Important (Weekly):
+    - data/chroma_db/
+    - config/bank_templates.json
+    - config.py (if customized)
+
+Optional:
+    - data/ocr_cache/ (can be regenerated)
+    - logs/ (if audit required)
+
+
+BACKUP COMMANDS:
+----------------
+
+Windows (PowerShell):
+    # Backup data folder
+    Compress-Archive -Path ".\data" -DestinationPath "backup_data_$(Get-Date -Format 'yyyyMMdd').zip"
+
+    # Backup MongoDB
+    mongodump --out backup_mongo_$(Get-Date -Format 'yyyyMMdd')
+
+Linux:
+    # Backup data folder
+    tar -czvf backup_data_$(date +%Y%m%d).tar.gz ./data
+
+    # Backup MongoDB
+    mongodump --out backup_mongo_$(date +%Y%m%d)
+
+
+RESTORE COMMANDS:
+-----------------
+
+Windows (PowerShell):
+    # Restore data folder
+    Expand-Archive -Path "backup_data_20251224.zip" -DestinationPath ".\data"
+
+    # Restore MongoDB
+    mongorestore backup_mongo_20251224/
+
+Linux:
+    # Restore data folder
+    tar -xzvf backup_data_20251224.tar.gz
+
+    # Restore MongoDB
+    mongorestore backup_mongo_20251224/
+
+
+================================================================================
+                    8. TROUBLESHOOTING QUICK REFERENCE
+================================================================================
+
+COMMON ISSUES:
+--------------
+
+Issue: "No transactions found"
+Solutions:
+    1. Check file format (.pdf, .xlsx, .xls, .csv)
+    2. Verify bank is supported (check console logs)
+    3. Verify Tesseract installed for scanned PDFs
+    4. Check TESSERACT_CMD path in config.py
+
+Issue: "OCR not working"
+Solutions:
+    1. Verify Tesseract: tesseract --version
+    2. Verify Poppler: C:\poppler\bin\pdftoppm -h
+    3. Check paths in config.py
+    4. Ensure Pillow installed: pip install Pillow
+
+Issue: "Processing takes too long"
+Solutions:
+    1. First-time OCR is slow (~100s for 23 pages)
+    2. Subsequent uploads use cache (<1s)
+    3. Clear cache if needed: del data\ocr_cache\*
+    4. Reduce OCR_DPI in config.py (350 recommended)
+
+Issue: "MongoDB connection failed"
+Solutions:
+    1. Check MongoDB running: net start MongoDB
+    2. Verify MONGODB_URI environment variable
+    3. Tool works without MongoDB (no persistence)
+
+Issue: "CDN/Bootstrap not loading"
+Solutions:
+    1. App uses cdnjs.cloudflare.com (less likely blocked)
+    2. Check browser console for errors
+    3. Disable tracking prevention for localhost
+    4. Try different browser
+
+Issue: "Multiple file upload not working"
+Solutions:
+    1. Hold Ctrl while selecting files in dialog
+    2. Use drag & drop instead
+    3. Use "Add More" button to add files one by one
+    4. Check browser console for JavaScript errors
+
+
+CLEAR CACHE COMMANDS:
+---------------------
+
+Clear OCR cache (forces re-processing):
+    Windows: del /q data\ocr_cache\*
+    Linux: rm -rf data/ocr_cache/*
+
+Clear learning data (reset ML):
+    Windows: del /q data\chroma_db\*
+    Linux: rm -rf data/chroma_db/*
+
+Clear all temporary files:
+    Windows: del /q uploads\* output\*
+    Linux: rm -rf uploads/* output/*
+
+
+================================================================================
+                         9. IMPORTANT COMMANDS
+================================================================================
+
+STARTING THE APPLICATION:
+-------------------------
+
+Development:
+    python app.py
+
+Production (Windows):
+    waitress-serve --host=0.0.0.0 --port=8590 app:app
+
+Production (Linux):
+    gunicorn -w 4 -b 0.0.0.0:8590 app:app
+
+
+GIT COMMANDS:
+-------------
+
+Check status:
+    git status
+
+Stage all changes:
+    git add .
+
+Stage specific files:
+    git add README.md docs/
+
+Commit changes:
+    git commit -m "Your commit message"
+
+Push to remote:
+    git push origin main
+
+Pull latest:
+    git pull origin main
+
+
+VIRTUAL ENVIRONMENT:
+--------------------
+
+Create:
+    python -m venv venv
+
+Activate (Windows):
+    venv\Scripts\activate
+
+Activate (Linux/Mac):
+    source venv/bin/activate
+
+Deactivate:
+    deactivate
+
+Install dependencies:
+    pip install -r requirements.txt
+
+
+MONGODB COMMANDS:
+-----------------
+
+Start service:
+    net start MongoDB
+
+Stop service:
+    net stop MongoDB
+
+Connect to shell:
+    mongosh
+
+List databases:
+    show dbs
+
+Use database:
+    use bank_posting_tool
+
+List collections:
+    show collections
+
+Count transactions:
+    db.transactions.countDocuments()
+
+
+================================================================================
+                          10. CONTACT & SUPPORT
+================================================================================
+
+ORGANIZATION:
+    Harshwal Consulting Services
+
+SUPPORT EMAIL:
+    support@harshwalconsulting.com
+
+REPOSITORY:
+    github.com/harshwaladvisory
+
+WHEN REPORTING ISSUES, INCLUDE:
+    1. Python version: python --version
+    2. Operating system
+    3. Full error message/stack trace
+    4. Steps to reproduce
+    5. Sample file (redact sensitive data)
+
+
+================================================================================
+                              QUICK REFERENCE
+================================================================================
+
+Default URL:          http://localhost:8590
+Default Port:         8590
+Default Database:     bank_posting_tool
+Max File Size:        50MB
+Supported Formats:    PDF, XLSX, XLS, CSV
+
+OCR First Run:        ~100-120 seconds (23 pages)
+OCR Cached Run:       <1 second
+Excel/CSV:            1-2 seconds
+
+Confidence Levels:
+    High:   85-100%   (Green badge)
+    Medium: 60-84%    (Yellow badge)
+    Low:    0-59%     (Red badge)
+    None:   No match  (Gray badge)
+
+Modules:
+    CR = Cash Receipts     (GL 4000-4999)
+    CD = Cash Disbursements (GL 6000-7999)
+    JV = Journal Vouchers  (Various)
+
+================================================================================
+                         END OF DOCUMENT
+================================================================================

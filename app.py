@@ -774,69 +774,121 @@ def clear_session():
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    if 'file' not in request.files:
-        flash('No file selected', 'error')
-        return redirect(url_for('index'))
-    
-    file = request.files['file']
-    if file.filename == '' or not allowed_file(file.filename):
-        flash('Invalid file', 'error')
-        return redirect(url_for('index'))
-    
-    try:
-        filename = secure_filename(file.filename)
-
-        # Process file in-memory using a temporary file
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp_file:
-            file.save(tmp_file.name)
-            tmp_filepath = tmp_file.name
-
-        import sys
-        # Use SmartParser - template-based with AI fallback
-        parser = UniversalParser(use_llm=False)
-        print(f"", flush=True)
-        print(f"=" * 60, flush=True)
-        print(f"[DEBUG] *** USING SMARTPARSER (UPDATED CODE) ***", flush=True)
-        print(f"[DEBUG] Parser type: {type(parser.smart_parser).__name__ if hasattr(parser, 'smart_parser') else 'NO SMART PARSER!'}", flush=True)
-        print(f"=" * 60, flush=True)
-        print(f"[DEBUG] Parsing file: {tmp_filepath}", flush=True)
-        print(f"[DEBUG] File exists: {os.path.exists(tmp_filepath)}", flush=True)
-        print(f"[DEBUG] File size: {os.path.getsize(tmp_filepath)} bytes", flush=True)
-        sys.stdout.flush()
-
-        try:
-            transactions = parser.parse(tmp_filepath)
-            print(f"[DEBUG] Found {len(transactions)} transactions", flush=True)
-            # DEBUG: Show each transaction amount
-            for i, txn in enumerate(transactions):
-                print(f"[DEBUG] Txn {i+1}: amount={txn.get('amount')}, desc={txn.get('description', '')[:30]}, module={txn.get('module')}", flush=True)
-            # Capture parsing metadata for validation warnings
-            parsing_metadata = parser.get_parsing_metadata()
-            print(f"[DEBUG] Parsing metadata: {parsing_metadata}", flush=True)
-        except Exception as parse_error:
-            import traceback
-            print(f"[ERROR] Parse failed: {parse_error}", flush=True)
-            traceback.print_exc()
-            transactions = []
-            parsing_metadata = {}
-
-        # Clean up temporary file
-        try:
-            os.unlink(tmp_filepath)
-        except:
-            pass
-
-        if not transactions:
-            flash('No transactions found. Check console for debug output.', 'error')
+    # Support both single file ('file') and multiple files ('files')
+    files = request.files.getlist('files')
+    if not files or (len(files) == 1 and files[0].filename == ''):
+        # Fallback to single file upload for backwards compatibility
+        if 'file' in request.files:
+            single_file = request.files['file']
+            if single_file.filename != '':
+                files = [single_file]
+            else:
+                flash('No file selected', 'error')
+                return redirect(url_for('index'))
+        else:
+            flash('No file selected', 'error')
             return redirect(url_for('index'))
 
-        # Check for duplicates
-        duplicates_found = check_for_duplicates(transactions)
+    # Filter valid files
+    valid_files = [f for f in files if f.filename != '' and allowed_file(f.filename)]
+    if not valid_files:
+        flash('No valid files selected. Supported formats: PDF, Excel, CSV', 'error')
+        return redirect(url_for('index'))
+
+    try:
+        import tempfile
+        import sys
+
+        all_transactions = []
+        all_filenames = []
+        combined_metadata = {
+            'files_processed': [],
+            'ocr_used': False,
+            'bank_name': None,
+            'warnings': []
+        }
+
+        print(f"", flush=True)
+        print(f"=" * 60, flush=True)
+        print(f"[DEBUG] *** PROCESSING {len(valid_files)} FILE(S) ***", flush=True)
+        print(f"=" * 60, flush=True)
+
+        for file_idx, file in enumerate(valid_files):
+            filename = secure_filename(file.filename)
+            all_filenames.append(filename)
+
+            print(f"", flush=True)
+            print(f"[DEBUG] Processing file {file_idx + 1}/{len(valid_files)}: {filename}", flush=True)
+
+            # Process file in-memory using a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp_file:
+                file.save(tmp_file.name)
+                tmp_filepath = tmp_file.name
+
+            # Use SmartParser - template-based with AI fallback
+            parser = UniversalParser(use_llm=False)
+            print(f"[DEBUG] Parser type: {type(parser.smart_parser).__name__ if hasattr(parser, 'smart_parser') else 'NO SMART PARSER!'}", flush=True)
+            print(f"[DEBUG] File exists: {os.path.exists(tmp_filepath)}", flush=True)
+            print(f"[DEBUG] File size: {os.path.getsize(tmp_filepath)} bytes", flush=True)
+            sys.stdout.flush()
+
+            try:
+                transactions = parser.parse(tmp_filepath)
+                print(f"[DEBUG] Found {len(transactions)} transactions in {filename}", flush=True)
+
+                # Add source file info to each transaction
+                for txn in transactions:
+                    txn['source_file'] = filename
+
+                # DEBUG: Show each transaction amount
+                for i, txn in enumerate(transactions):
+                    print(f"[DEBUG] Txn {i+1}: amount={txn.get('amount')}, desc={txn.get('description', '')[:30]}, module={txn.get('module')}", flush=True)
+
+                # Capture parsing metadata for validation warnings
+                parsing_metadata = parser.get_parsing_metadata()
+                print(f"[DEBUG] Parsing metadata: {parsing_metadata}", flush=True)
+
+                # Merge metadata
+                combined_metadata['files_processed'].append({
+                    'filename': filename,
+                    'transaction_count': len(transactions),
+                    'bank_name': parsing_metadata.get('bank_name'),
+                    'ocr_used': parsing_metadata.get('ocr_used', False)
+                })
+                if parsing_metadata.get('ocr_used'):
+                    combined_metadata['ocr_used'] = True
+                if parsing_metadata.get('bank_name') and not combined_metadata['bank_name']:
+                    combined_metadata['bank_name'] = parsing_metadata.get('bank_name')
+                if parsing_metadata.get('warnings'):
+                    combined_metadata['warnings'].extend(parsing_metadata.get('warnings', []))
+
+                all_transactions.extend(transactions)
+
+            except Exception as parse_error:
+                import traceback
+                print(f"[ERROR] Parse failed for {filename}: {parse_error}", flush=True)
+                traceback.print_exc()
+                combined_metadata['warnings'].append(f"Failed to parse {filename}: {str(parse_error)}")
+
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_filepath)
+            except:
+                pass
+
+        if not all_transactions:
+            flash('No transactions found in any of the uploaded files.', 'error')
+            return redirect(url_for('index'))
+
+        print(f"", flush=True)
+        print(f"[DEBUG] Total transactions from all files: {len(all_transactions)}", flush=True)
+
+        # Check for duplicates across all files
+        duplicates_found = check_for_duplicates(all_transactions)
 
         # Validate transactions
         validation_warnings = []
-        for i, txn in enumerate(transactions):
+        for i, txn in enumerate(all_transactions):
             # Check for zero amounts
             if abs(txn.get('amount', 0)) < 0.01:
                 txn['needs_review'] = True
@@ -854,7 +906,7 @@ def upload():
                 pass
 
         classifier = ClassificationEngine()
-        classified = classifier.classify_batch(transactions)
+        classified = classifier.classify_batch(all_transactions)
 
         # DEBUG: Show classified amounts
         print(f"[DEBUG] After classification:", flush=True)
@@ -870,22 +922,30 @@ def upload():
         total_jv = sum(abs(t.get('amount', 0)) for t in by_module_temp['JV'])
         print(f"[DEBUG] Summary - CR: ${total_cr:.2f}, CD: ${total_cd:.2f}, JV: ${total_jv:.2f}", flush=True)
 
+        # Create combined filename for display
+        combined_filename = ', '.join(all_filenames) if len(all_filenames) <= 3 else f"{all_filenames[0]} + {len(all_filenames) - 1} more files"
+
         # FIXED: Use per-user session instead of global variable
         session_data = {
-            'transactions': transactions,
+            'transactions': all_transactions,
             'classified': classified,
             'audit_trail': [],
             'output_files': [],
             'uploaded_at': datetime.now().isoformat(),
-            'filename': filename,
-            'parsing_metadata': parsing_metadata  # Store for validation warnings
+            'filename': combined_filename,
+            'filenames': all_filenames,  # Store all filenames
+            'parsing_metadata': combined_metadata  # Store combined metadata
         }
-        print(f"[DEBUG] SAVING SESSION: {len(transactions)} raw, {len(classified)} classified", flush=True)
+        print(f"[DEBUG] SAVING SESSION: {len(all_transactions)} raw, {len(classified)} classified", flush=True)
         save_result = save_user_session_data(session_data)
         print(f"[DEBUG] Save result: {save_result}", flush=True)
 
         # Build flash message with warnings
-        messages = [f'Parsed {len(transactions)} transactions']
+        if len(valid_files) > 1:
+            messages = [f'Processed {len(valid_files)} files with {len(all_transactions)} total transactions']
+        else:
+            messages = [f'Parsed {len(all_transactions)} transactions']
+
         if duplicates_found:
             messages.append(f'[!] {len(duplicates_found)} potential duplicates found (flagged for review)')
         if validation_warnings:

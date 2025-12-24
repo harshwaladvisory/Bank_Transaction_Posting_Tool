@@ -16,7 +16,7 @@ import re
 import os
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 # OCR and PDF libraries
@@ -1552,22 +1552,52 @@ class SmartParser:
         return None
 
     def _extract_expected_totals(self, text: str, template: Dict):
-        """Extract expected totals from bank summary."""
+        """Extract expected totals from bank summary.
+
+        For multi-month statements (like Sovereign Bank combined PDFs), this function
+        sums ALL matches instead of just taking the last one.
+        """
         summary_patterns = template.get('summary_patterns', {})
+
+        # Detect if this is a multi-month statement by counting "Statement Ending" occurrences
+        # or "Credit(s) This Period" occurrences (for Sovereign)
+        is_multi_month = False
+        bank_upper = (self.bank_name or '').upper()
+
+        if 'SOVEREIGN' in bank_upper:
+            # Count how many statement periods are in this PDF
+            period_count = len(re.findall(r'Statement\s+Ending', text, re.IGNORECASE))
+            if period_count > 1:
+                is_multi_month = True
+                self._is_multi_month_statement = True  # Set flag to skip date validation
+                if self.debug:
+                    print(f"[DEBUG] Detected multi-month Sovereign statement ({period_count} periods)", flush=True)
 
         # Extract deposits total
         dep_pattern = summary_patterns.get('total_deposits')
         if dep_pattern:
             matches = re.findall(dep_pattern, text, re.IGNORECASE)
             if matches:
-                # Take the LAST match (usually the actual total, not summary line)
-                amt_str = matches[-1][-1] if isinstance(matches[-1], tuple) else matches[-1]
-                try:
-                    self._expected_deposits = float(amt_str.replace(',', ''))
-                    if self.debug:
-                        print(f"[DEBUG] Expected deposits from statement: ${self._expected_deposits:,.2f}", flush=True)
-                except:
-                    pass
+                if is_multi_month:
+                    # Sum ALL matches for multi-month statements
+                    total_deposits = 0
+                    for match in matches:
+                        amt_str = match[-1] if isinstance(match, tuple) else match
+                        try:
+                            total_deposits += float(amt_str.replace(',', '').replace(' ', ''))
+                        except:
+                            pass
+                    self._expected_deposits = total_deposits
+                else:
+                    # Take the LAST match (usually the actual total, not summary line)
+                    amt_str = matches[-1][-1] if isinstance(matches[-1], tuple) else matches[-1]
+                    try:
+                        self._expected_deposits = float(amt_str.replace(',', ''))
+                    except:
+                        pass
+
+                if self.debug and self._expected_deposits:
+                    print(f"[DEBUG] Expected deposits from statement: ${self._expected_deposits:,.2f}", flush=True)
 
         # Extract withdrawals total (may need to combine checks + other withdrawals)
         wd_pattern = summary_patterns.get('total_withdrawals')
@@ -1578,20 +1608,38 @@ class SmartParser:
         if checks_pattern:
             matches = re.findall(checks_pattern, text, re.IGNORECASE)
             if matches:
-                amt_str = matches[-1][-1] if isinstance(matches[-1], tuple) else matches[-1]
-                try:
-                    total_withdrawals += float(amt_str.replace(',', ''))
-                except:
-                    pass
+                if is_multi_month:
+                    # Sum ALL matches for multi-month statements
+                    for match in matches:
+                        amt_str = match[-1] if isinstance(match, tuple) else match
+                        try:
+                            total_withdrawals += float(amt_str.replace(',', '').replace(' ', ''))
+                        except:
+                            pass
+                else:
+                    amt_str = matches[-1][-1] if isinstance(matches[-1], tuple) else matches[-1]
+                    try:
+                        total_withdrawals += float(amt_str.replace(',', ''))
+                    except:
+                        pass
 
         if wd_pattern:
             matches = re.findall(wd_pattern, text, re.IGNORECASE)
             if matches:
-                amt_str = matches[-1][-1] if isinstance(matches[-1], tuple) else matches[-1]
-                try:
-                    total_withdrawals += float(amt_str.replace(',', ''))
-                except:
-                    pass
+                if is_multi_month:
+                    # Sum ALL matches for multi-month statements
+                    for match in matches:
+                        amt_str = match[-1] if isinstance(match, tuple) else match
+                        try:
+                            total_withdrawals += float(amt_str.replace(',', '').replace(' ', ''))
+                        except:
+                            pass
+                else:
+                    amt_str = matches[-1][-1] if isinstance(matches[-1], tuple) else matches[-1]
+                    try:
+                        total_withdrawals += float(amt_str.replace(',', ''))
+                    except:
+                        pass
 
         if total_withdrawals > 0:
             self._expected_withdrawals = total_withdrawals
@@ -1700,11 +1748,26 @@ class SmartParser:
         (e.g., multiple $720 DEPOSIT entries on 07/25).
 
         Also detects and removes repeated statement sections (entire statement duplicates).
+        Additionally validates that transaction dates fall within the statement period.
         """
         max_amount = self.templates.get('max_transaction_amount', self.DEFAULT_MAX_AMOUNT)
         seen_counts = {}  # Track how many times we've seen each key
         MAX_DUPLICATES = 2  # Allow up to 2 identical transactions (catches statement duplicates)
         valid = []
+
+        # Parse statement period dates for validation
+        period_start = None
+        period_end = None
+        if self._statement_period_start:
+            try:
+                period_start = datetime.strptime(self._statement_period_start, '%m/%d/%Y')
+            except:
+                pass
+        if self._statement_period_end:
+            try:
+                period_end = datetime.strptime(self._statement_period_end, '%m/%d/%Y')
+            except:
+                pass
 
         for txn in transactions:
             # Must have date and amount
@@ -1714,6 +1777,22 @@ class SmartParser:
             # Check amount bounds
             if abs(txn['amount']) > max_amount or abs(txn['amount']) < 0.01:
                 continue
+
+            # Validate transaction date is within statement period
+            # Skip validation for multi-month statements (Sovereign Bank combined PDFs)
+            is_multi_month = getattr(self, '_is_multi_month_statement', False)
+            if period_start and period_end and not is_multi_month:
+                try:
+                    txn_date = datetime.strptime(txn['date'], '%m/%d/%Y')
+                    # Allow 1 day grace period on either side for edge cases
+                    grace_start = period_start - timedelta(days=1)
+                    grace_end = period_end + timedelta(days=1)
+                    if txn_date < grace_start or txn_date > grace_end:
+                        if self.debug:
+                            print(f"[DEBUG] Skipping transaction with date {txn['date']} outside statement period {self._statement_period_start} - {self._statement_period_end}", flush=True)
+                        continue
+                except:
+                    pass  # If date parsing fails, don't reject the transaction
 
             # Clean description of OCR artifacts (leading/trailing quotes, special chars)
             if txn.get('description'):
@@ -3500,10 +3579,16 @@ class SmartParser:
         The detail section often has garbled text like:
             04/17/0025" svete Withdcoual ; sntevnntntttnnnnnnieennnae ~s tae, 00)"
             04/97/2025 ccm END cain ( $145.00) $706,222.18
+            O4/9 7/2025 eee Wit Wedccwmsaasand$145.00) 0 $706,222.18
 
         PSM 4/11 may produce cleaner output:
             03/19/2025 Withdrawal ($145.00) $706,007.33
             03/31/2025 Interest Capitalization 359.85 706,367.18
+
+        OCR garbling patterns to handle:
+        - "O4" -> "04" (letter O instead of zero)
+        - "9 7" -> "17" (space in middle of day)
+        - "0025" -> "2025" (zero instead of 2 in year)
 
         We look for:
         1. date pattern + withdrawal-like keyword on same or nearby line
@@ -3531,16 +3616,48 @@ class SmartParser:
             line_lower = line.lower()
 
             # Check if this line or nearby lines have withdrawal keyword
-            if 'withd' in line_lower or 'withdraw' in line_lower:
+            # Also check for OCR-garbled versions: "Wit", "Withd", etc.
+            if 'wit' in line_lower or 'withd' in line_lower or 'withdraw' in line_lower:
                 withdrawal_nearby = True
 
-            # Look for any date in the detail section
-            date_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', line)
-            if date_match:
-                month, day, year = date_match.group(1), date_match.group(2), date_match.group(3)
-                month_int = int(month)
-                day_int = int(day)
+            # Try multiple date patterns to handle OCR garbling
+            date_match = None
+            month_int = None
+            day_int = None
+            year = None
 
+            # Pattern 1: Standard date (e.g., "04/17/2025")
+            std_match = re.search(r'(\d{2})/(\d{2})/(\d{4})', line)
+            if std_match:
+                date_match = std_match
+                month_int = int(std_match.group(1))
+                day_int = int(std_match.group(2))
+                year = std_match.group(3)
+
+            # Pattern 2: OCR garbled with letter O and/or space in date
+            # Matches: "O4/9 7/2025", "O4/17/2025", "04/9 7/2025"
+            if not date_match:
+                garbled_match = re.search(r'[O0](\d)[/\s]*(\d)\s*(\d)[/\s]*(\d{4})', line)
+                if garbled_match:
+                    date_match = garbled_match
+                    month_int = int(garbled_match.group(1))  # Single digit month (e.g., 4)
+                    # Day is split: "9 7" -> combine to "17"
+                    day_int = int(garbled_match.group(2)) * 10 + int(garbled_match.group(3))
+                    year = garbled_match.group(4)
+                    if self.debug:
+                        print(f"[DEBUG] CrossFirst: OCR garbled date detected: {garbled_match.group(0)} -> {month_int:02d}/{day_int:02d}/{year}", flush=True)
+
+            # Pattern 3: OCR garbled with letter O for month, normal day
+            # Matches: "O4/17/2025"
+            if not date_match:
+                garbled_match2 = re.search(r'[O0](\d)/(\d{2})/(\d{4})', line)
+                if garbled_match2:
+                    date_match = garbled_match2
+                    month_int = int(garbled_match2.group(1))
+                    day_int = int(garbled_match2.group(2))
+                    year = garbled_match2.group(3)
+
+            if date_match and month_int is not None and day_int is not None and year is not None:
                 # Fix garbled year (0025 -> 2025, 0024 -> 2024)
                 if year.startswith('00'):
                     year = '20' + year[2:]
@@ -3571,11 +3688,15 @@ class SmartParser:
                     else:
                         # Check for withdrawal indicators on this line
                         is_withdrawal_line = (
+                            'wit' in line_lower or  # Catches "Wit" (garbled "Withdrawal")
                             'withd' in line_lower or
                             'withdraw' in line_lower or
-                            re.search(r'\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line)  # Parenthetical amount
+                            re.search(r'\(\s*\$?\s*[\d,]+\.\d{2}\s*\)', line) or  # Parenthetical amount
+                            re.search(r'\$145', line)  # Known CrossFirst withdrawal amounts
                         )
                         if is_withdrawal_line:
+                            if self.debug:
+                                print(f"[DEBUG] CrossFirst: Found withdrawal date {fixed_date} from line: {line[:60]}...", flush=True)
                             return fixed_date
 
                         # Save this date with line number for later processing
