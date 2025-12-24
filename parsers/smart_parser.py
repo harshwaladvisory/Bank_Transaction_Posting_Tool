@@ -973,6 +973,10 @@ class SmartParser:
         if self.bank_name == 'PNC':
             transactions = self._reconcile_pnc_transactions(text, transactions, template)
 
+        # Truist Bank: Reconcile missing transactions due to OCR errors
+        if self.bank_name == 'Truist':
+            transactions = self._reconcile_truist_transactions(text, transactions, template)
+
         return transactions
 
     def _parse_multicolumn_checks(self, text: str, date_format: str, seen: set) -> List[Dict]:
@@ -3701,6 +3705,239 @@ class SmartParser:
                 })
                 if self.debug:
                     print(f"[DEBUG] PNC: Created service charge from discrepancy: {charge_date} ${withdrawal_diff:.2f}", flush=True)
+
+        return transactions
+
+    def _reconcile_truist_transactions(self, text: str, transactions: List[Dict], template: Dict) -> List[Dict]:
+        """
+        Reconcile Truist Bank transactions to fix OCR errors.
+
+        Known issues:
+        1. Large deposits may be split or garbled by OCR
+        2. Some checks may be missed in multi-column format
+        3. ACH transactions in wrong sections
+
+        Strategy:
+        - Extract expected totals from statement summary
+        - Find missing amounts by searching for standalone amounts in text
+        - Recover missed transactions using balance validation
+        """
+        if self.debug:
+            print(f"[DEBUG] Truist: Reconciling {len(transactions)} transactions", flush=True)
+
+        # Calculate current totals
+        current_deposits = sum(t.get('amount', 0) for t in transactions if t.get('amount', 0) > 0)
+        current_withdrawals = sum(abs(t.get('amount', 0)) for t in transactions if t.get('amount', 0) < 0)
+
+        # Extract expected totals from Truist statement
+        # Format: "Total deposits, credits and interest = $163,705.78"
+        # Format: "Total checks = $X" and "Total other withdrawals = $Y"
+        expected_deposits = 0.0
+        expected_withdrawals = 0.0
+
+        # Look for total deposits
+        dep_patterns = [
+            r'Total\s+deposits[,\s]*credits\s+and\s+interest\s*=?\s*\$?([\d,]+\.\d{2})',
+            r'Total\s+deposits\s*=?\s*\$?([\d,]+\.\d{2})',
+            r'deposits[,\s]+credits[^\d]*([\d,]+\.\d{2})',
+        ]
+        for pattern in dep_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                expected_deposits = float(match.group(1).replace(',', ''))
+                if self.debug:
+                    print(f"[DEBUG] Truist: Expected total deposits: ${expected_deposits:,.2f}", flush=True)
+                break
+
+        # Look for total withdrawals (checks + other withdrawals)
+        total_checks = 0.0
+        total_other_wd = 0.0
+
+        check_patterns = [
+            r'Total\s+checks\s*=?\s*\$?([\d,]+\.\d{2})',
+        ]
+        for pattern in check_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                total_checks = float(match.group(1).replace(',', ''))
+                if self.debug:
+                    print(f"[DEBUG] Truist: Expected total checks: ${total_checks:,.2f}", flush=True)
+                break
+
+        wd_patterns = [
+            r'Total\s+other\s+withdrawals[,\s]*debits\s+and\s+service\s+charges?\s*=?\s*\$?([\d,]+\.\d{2})',
+            r'Total\s+other\s+withdrawals\s*=?\s*\$?([\d,]+\.\d{2})',
+            r'other\s+withdrawals[^\d]*([\d,]+\.\d{2})',
+        ]
+        for pattern in wd_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                total_other_wd = float(match.group(1).replace(',', ''))
+                if self.debug:
+                    print(f"[DEBUG] Truist: Expected total other withdrawals: ${total_other_wd:,.2f}", flush=True)
+                break
+
+        expected_withdrawals = total_checks + total_other_wd
+
+        # Calculate discrepancies
+        deposit_diff = expected_deposits - current_deposits
+        withdrawal_diff = expected_withdrawals - current_withdrawals
+
+        if self.debug:
+            print(f"[DEBUG] Truist: Current deposits: ${current_deposits:,.2f}, expected: ${expected_deposits:,.2f}", flush=True)
+            print(f"[DEBUG] Truist: Deposit discrepancy: ${deposit_diff:,.2f}", flush=True)
+            print(f"[DEBUG] Truist: Current withdrawals: ${current_withdrawals:,.2f}, expected: ${expected_withdrawals:,.2f}", flush=True)
+            print(f"[DEBUG] Truist: Withdrawal discrepancy: ${withdrawal_diff:,.2f}", flush=True)
+
+        # Fix 1: Find missing deposits
+        # Look for large deposit amounts in text that weren't captured
+        if deposit_diff > 100:
+            # Search for deposit amounts that might be missing
+            # Common patterns: standalone amounts near DEPOSIT keyword
+            deposit_amount_patterns = [
+                r'DEPOSIT[^\d]{0,30}([\d,]+\.\d{2})',
+                r'ACH\s+CREDIT[^\d]{0,30}([\d,]+\.\d{2})',
+                r'(\d{2}/\d{2})\s+DEPOSIT\s+[^\d]*([\d,]+\.\d{2})',
+            ]
+
+            for pattern in deposit_amount_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        if isinstance(match, tuple):
+                            # Pattern with date
+                            date_str, amount_str = match[0], match[-1]
+                            date = self._format_date(date_str, 'MM/DD')
+                        else:
+                            amount_str = match
+                            date = self._statement_period_end or f"10/24/{self.statement_year}"
+
+                        amount = float(amount_str.replace(',', ''))
+
+                        # Check if amount is significant and not already captured
+                        if amount > 1000 and amount <= deposit_diff + 100:
+                            already_have = any(
+                                abs(t.get('amount', 0) - amount) < 1
+                                for t in transactions if t.get('amount', 0) > 0
+                            )
+                            if not already_have:
+                                transactions.append({
+                                    'date': date if isinstance(date, str) else f"10/24/{self.statement_year}",
+                                    'description': 'DEPOSIT (OCR recovered)',
+                                    'amount': amount,
+                                    'is_deposit': True,
+                                    'module': 'CR',
+                                    'confidence_score': 70,
+                                    'confidence_level': 'medium',
+                                    'parsed_by': 'truist_ocr_recovery',
+                                    'pattern_used': 'deposit_recovery'
+                                })
+                                if self.debug:
+                                    print(f"[DEBUG] Truist: Recovered missing deposit: ${amount:,.2f}", flush=True)
+                                deposit_diff -= amount
+
+                                if deposit_diff < 100:
+                                    break
+                    except (ValueError, TypeError):
+                        continue
+
+                if deposit_diff < 100:
+                    break
+
+        # Fix 2: Find missing checks/withdrawals
+        # Look for check amounts that weren't captured
+        if withdrawal_diff > 100:
+            # Search for check patterns that might have been missed
+            check_patterns = [
+                r'(\d{2}/\d{2})\s+(?:\*\s*)?(\d{4,10})\s*[,_\-—]?\s*\$?([\d,]+\.\d{2})',
+                r'CHECK\s*#?\s*(\d{4,10})[^\d]*([\d,]+\.\d{2})',
+            ]
+
+            for pattern in check_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        if len(match) == 3:
+                            date_str, check_num, amount_str = match
+                            date = self._format_date(date_str, 'MM/DD')
+                            description = f"CHECK #{check_num}"
+                        else:
+                            check_num, amount_str = match
+                            date = self._statement_period_end or f"10/24/{self.statement_year}"
+                            description = f"CHECK #{check_num}"
+
+                        amount = float(amount_str.replace(',', ''))
+
+                        # Check if amount is significant and not already captured
+                        if amount > 100 and amount <= withdrawal_diff + 100:
+                            already_have = any(
+                                abs(abs(t.get('amount', 0)) - amount) < 1
+                                for t in transactions if t.get('amount', 0) < 0
+                            )
+                            if not already_have:
+                                transactions.append({
+                                    'date': date if isinstance(date, str) else f"10/24/{self.statement_year}",
+                                    'description': f'{description} (OCR recovered)',
+                                    'amount': -abs(amount),
+                                    'is_deposit': False,
+                                    'module': 'CD',
+                                    'confidence_score': 70,
+                                    'confidence_level': 'medium',
+                                    'parsed_by': 'truist_ocr_recovery',
+                                    'pattern_used': 'check_recovery'
+                                })
+                                if self.debug:
+                                    print(f"[DEBUG] Truist: Recovered missing check: {description} ${amount:,.2f}", flush=True)
+                                withdrawal_diff -= amount
+
+                                if withdrawal_diff < 100:
+                                    break
+                    except (ValueError, TypeError):
+                        continue
+
+                if withdrawal_diff < 100:
+                    break
+
+        # Fix 3: If still missing significant amounts, create adjustment entries
+        # Recalculate discrepancies
+        current_deposits = sum(t.get('amount', 0) for t in transactions if t.get('amount', 0) > 0)
+        current_withdrawals = sum(abs(t.get('amount', 0)) for t in transactions if t.get('amount', 0) < 0)
+        deposit_diff = expected_deposits - current_deposits
+        withdrawal_diff = expected_withdrawals - current_withdrawals
+
+        if deposit_diff > 100 and deposit_diff < 50000:
+            # Create an adjustment entry for missing deposits
+            adj_date = self._statement_period_end or f"10/24/{self.statement_year}"
+            transactions.append({
+                'date': adj_date,
+                'description': 'OCR ADJUSTMENT - Unread deposits',
+                'amount': deposit_diff,
+                'is_deposit': True,
+                'module': 'CR',
+                'confidence_score': 60,
+                'confidence_level': 'low',
+                'parsed_by': 'truist_balance_reconciliation',
+                'pattern_used': 'deposit_adjustment'
+            })
+            if self.debug:
+                print(f"[DEBUG] Truist: Created deposit adjustment: ${deposit_diff:,.2f}", flush=True)
+
+        if withdrawal_diff > 100 and withdrawal_diff < 50000:
+            # Create an adjustment entry for missing withdrawals
+            adj_date = self._statement_period_end or f"10/24/{self.statement_year}"
+            transactions.append({
+                'date': adj_date,
+                'description': 'OCR ADJUSTMENT - Unread withdrawals',
+                'amount': -abs(withdrawal_diff),
+                'is_deposit': False,
+                'module': 'CD',
+                'confidence_score': 60,
+                'confidence_level': 'low',
+                'parsed_by': 'truist_balance_reconciliation',
+                'pattern_used': 'withdrawal_adjustment'
+            })
+            if self.debug:
+                print(f"[DEBUG] Truist: Created withdrawal adjustment: ${withdrawal_diff:,.2f}", flush=True)
 
         return transactions
 
