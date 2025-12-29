@@ -89,6 +89,8 @@ def _find_poppler():
 
     # Common Windows installation paths
     common_paths = [
+        # Bundled with project (preferred for deployment)
+        os.path.join(BASE_DIR, 'poppler', 'Library', 'bin'),
         r'C:\Program Files\poppler\Library\bin',
         r'C:\Program Files (x86)\poppler\Library\bin',
         os.path.expandvars(r'%USERPROFILE%\poppler\Library\bin'),
