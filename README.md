@@ -141,23 +141,33 @@ The tool includes several performance optimizations for PDF processing:
    pip install -r requirements.txt
    ```
 
-3. **Install OCR dependencies:**
+3. **Install OCR dependencies (required for PDF processing):**
 
    **Windows:**
-   - Download and install [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)
-   - Download and extract [Poppler](https://github.com/oschwartz10612/poppler-windows/releases)
-   - Update paths in `config.py`:
-     ```python
-     TESSERACT_CMD = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-     POPPLER_PATH = r'C:\path\to\poppler\bin'
-     ```
+   - Download and install [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) to default location (`C:\Program Files\Tesseract-OCR\`)
+   - Download and extract [Poppler](https://github.com/oschwartz10612/poppler-windows/releases) to `C:\Program Files\poppler\` or `C:\poppler\`
+
+   The tool automatically detects common installation paths. If installed elsewhere, set environment variables:
+   ```bash
+   set TESSERACT_CMD=C:\path\to\tesseract.exe
+   set POPPLER_PATH=C:\path\to\poppler\Library\bin
+   ```
+
+   **Linux/Mac:**
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install tesseract-ocr poppler-utils
+
+   # Mac (Homebrew)
+   brew install tesseract poppler
+   ```
 
 4. **Set environment variables** (production):
    ```bash
    export SECRET_KEY="$(python -c 'import secrets; print(secrets.token_hex(32))')"
    export MONGODB_URI="mongodb://localhost:27017/"
    export MONGODB_DATABASE="bank_posting_tool"
-   export PORT=8590
+   export PORT=8587
    ```
 
 5. **Run the application:**
@@ -167,7 +177,7 @@ The tool includes several performance optimizations for PDF processing:
 
 6. **Open in browser:**
    ```
-   http://localhost:8590
+   http://localhost:8587
    ```
 
 ---
@@ -364,8 +374,10 @@ POPPLER_PATH = r'C:\path\to\poppler\bin'
 |----------|----------|---------|-------------|
 | `SECRET_KEY` | Production | Auto-generated | Flask session secret |
 | `MONGODB_URI` | No | localhost:27017 | MongoDB connection |
-| `PORT` | No | 8590 | Server port |
+| `PORT` | No | 8587 | Server port |
 | `FLASK_DEBUG` | No | True | Debug mode |
+| `TESSERACT_CMD` | No | Auto-detected | Path to tesseract.exe |
+| `POPPLER_PATH` | No | Auto-detected | Path to poppler bin directory |
 
 ---
 
@@ -455,6 +467,6 @@ All rights reserved.
 
 **Version:** 2.2.0
 **Python Required:** 3.8+
-**Default Port:** 8590
+**Default Port:** 8587
 
 Made by Harshwal Consulting Services

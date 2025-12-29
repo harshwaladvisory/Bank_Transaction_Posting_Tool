@@ -61,9 +61,52 @@ OUTPUT_FILES = {
 SUPPORTED_BANK_EXTENSIONS = ['.pdf', '.xlsx', '.xls', '.csv']
 SUPPORTED_GL_EXTENSIONS = ['.xlsx', '.xls', '.csv', '.txt']
 
-# OCR settings
-TESSERACT_CMD = r'C:\Users\sanjana.thakur\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'  # Windows default
-POPPLER_PATH = r'C:\Users\sanjana.thakur\poppler\Library\bin'  # Windows default
+# OCR settings - configurable via environment variables
+def _find_tesseract():
+    """Find Tesseract executable, checking common installation paths."""
+    if os.environ.get('TESSERACT_CMD'):
+        return os.environ.get('TESSERACT_CMD')
+
+    # Common Windows installation paths
+    common_paths = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        os.path.expandvars(r'%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe'),
+        os.path.expandvars(r'%USERPROFILE%\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'),
+    ]
+
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+
+    # Fallback to PATH (works on Linux/Mac or if added to Windows PATH)
+    return 'tesseract'
+
+def _find_poppler():
+    """Find Poppler bin directory, checking common installation paths."""
+    if os.environ.get('POPPLER_PATH'):
+        return os.environ.get('POPPLER_PATH')
+
+    # Common Windows installation paths
+    common_paths = [
+        r'C:\Program Files\poppler\Library\bin',
+        r'C:\Program Files (x86)\poppler\Library\bin',
+        os.path.expandvars(r'%USERPROFILE%\poppler\Library\bin'),
+        r'C:\poppler\Library\bin',
+        r'C:\poppler\bin',
+        # Chocolatey installation
+        r'C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin',
+    ]
+
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+
+    # Return None - pdf2image will use PATH or show appropriate error
+    return None
+
+TESSERACT_CMD = _find_tesseract()
+POPPLER_PATH = _find_poppler()
 
 # Flask settings
 FLASK_HOST = '0.0.0.0'  # Listen on all interfaces for deployment
