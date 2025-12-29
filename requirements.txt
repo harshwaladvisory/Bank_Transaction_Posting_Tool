@@ -19,6 +19,7 @@ pymongo
 
 # Utilities
 python-dateutil
+requests
 
 # ChromaDB Learning System (Local AI - no external API calls)
 chromadb
