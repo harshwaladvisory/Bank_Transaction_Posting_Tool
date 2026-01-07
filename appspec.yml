@@ -1,0 +1,25 @@
+version: 0.0
+os: linux
+
+files:
+  - source: /
+    destination: /opt/my-app
+    overwrite: yes
+
+hooks:
+  BeforeInstall:
+    - location: scripts/before_install.sh
+      timeout: 300
+      runas: root
+
+  ApplicationStop:
+    - location: scripts/app_stop.sh
+      timeout: 300
+      runas: root
+
+  ApplicationStart:
+    - location: scripts/app_start.sh
+      timeout: 1500
+      runas: root
+
+      
