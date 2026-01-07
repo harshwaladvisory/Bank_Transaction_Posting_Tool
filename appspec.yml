@@ -3,7 +3,7 @@ os: linux
 
 files:
   - source: /
-    destination: /opt/my-app
+    destination: /opt/bank_transaction_posting_uat_code
     overwrite: yes
 
 hooks:
