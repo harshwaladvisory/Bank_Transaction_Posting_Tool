@@ -1,6 +1,6 @@
 # Use official Python image
 FROM public.ecr.aws/docker/library/python:3.11-slim
-# Installing dependencies
+
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
